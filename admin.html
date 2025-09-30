@@ -1,126 +1,205 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AIStudyMate Admin</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-        body {
-            background-color: #f8f9fa;
-        }
-        .login-container {
-            max-width: 400px;
-            margin: 100px auto;
-            padding: 20px;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-        .admin-panel {
-            display: none;
-            margin: 20px auto;
-            max-width: 1000px;
-            padding: 20px;
-        }
-        .user-card {
-            margin-bottom: 15px;
-        }
+        body { font-family: 'Inter', sans-serif; background: radial-gradient(circle at top, rgba(99,102,241,0.1), transparent 60%), #f3f4f6; min-height: 100vh; }
+        .glass-card { background: rgba(255,255,255,0.9); backdrop-filter: blur(22px); box-shadow: 0 20px 45px rgba(99,102,241,0.15); }
+        .scrollbar-hidden::-webkit-scrollbar { display: none; }
+        .scrollbar-hidden { -ms-overflow-style: none; scrollbar-width: none; }
+        .fade-in { animation: fadeIn 0.4s ease-in-out both; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body>
-    <!-- Login Form -->
-    <div class="container login-container" id="loginForm">
-        <h2 class="text-center mb-4">Admin Login</h2>
-        <form id="loginFormElement">
-            <div class="mb-3">
-                <label for="password" class="form-label">Password</label>
-                <input type="password" class="form-control" id="password" required>
-            </div>
-            <button type="submit" class="btn btn-primary w-100">Login</button>
-        </form>
-    </div>
+<body class="text-gray-900">
+    <div class="min-h-screen flex flex-col items-center justify-center px-4 py-10">
+        <div class="w-full max-w-6xl">
+            <header class="mb-10 text-center fade-in">
+                <div class="inline-flex items-center gap-3 px-5 py-2.5 rounded-full bg-indigo-100/70 text-indigo-600 text-sm font-medium mb-5 shadow-sm">
+                    <i data-lucide="shield-check" class="w-4 h-4"></i>
+                    Панель управления AIStudyMate
+                </div>
+                <h1 class="text-4xl md:text-5xl font-bold text-gray-900">Админ-панель AIStudyMate</h1>
+                <p class="mt-4 text-gray-500">Управляйте пользователями, обновлениями и статусом сервера в одном месте.</p>
+            </header>
 
-    <!-- Admin Panel -->
-    <div class="container admin-panel" id="adminPanel">
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <h2>Admin Panel</h2>
-            <button class="btn btn-danger" id="logoutBtn">Logout</button>
-        </div>
-        
-        <div class="card mb-4">
-            <div class="card-header">
-                <h4>Users</h4>
-                <input type="text" class="form-control mb-2" id="searchUser" placeholder="Search users...">
-            </div>
-            <div class="card-body">
-                <div id="usersList"></div>
-            </div>
-        </div>
+            <!-- Login Card -->
+            <div id="loginForm" class="glass-card rounded-3xl border border-white/80 p-8 md:p-12 fade-in shadow-xl">
+                <div class="flex items-center gap-3 text-indigo-500 font-semibold text-sm uppercase tracking-wide mb-6">
+                    <i data-lucide="log-in" class="w-5 h-5"></i>
+                    Авторизация администратора
+                </div>
+                <h2 class="text-3xl font-bold text-gray-900 mb-2">Вход в админку</h2>
+                <p class="text-gray-500 mb-8">Введите защищённый пароль для доступа к панели управления.</p>
 
-        <div class="card">
-            <div class="card-header">
-                <h4>System</h4>
-            <div class="card-body">
-                <button class="btn btn-warning" id="reloadDbBtn">Reload Database</button>
-                <button class="btn btn-info" id="reloadBadgesBtn">Reload Badges</button>
-                <div class="mt-3">
-                    <h5>Server Status</h5>
-                    <div id="serverStatus">Loading...</div>
+                <form id="loginFormElement" class="space-y-6">
+                    <div>
+                        <label for="password" class="block text-sm font-medium text-gray-500 mb-2">Пароль администратора</label>
+                        <div class="relative">
+                            <input type="password" id="password" required class="w-full rounded-2xl border border-gray-200 bg-white/80 px-4 py-3 text-gray-900 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all" placeholder="Введите пароль">
+                            <button type="button" id="togglePassword" class="absolute inset-y-0 right-0 flex items-center px-4 text-gray-400 hover:text-indigo-500 transition" aria-label="Показать пароль">
+                                <i data-lucide="eye" class="w-5 h-5"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <button type="submit" class="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-3 rounded-2xl shadow-lg shadow-indigo-500/30 transition-all">Войти</button>
+                </form>
+            </div>
+
+            <!-- Admin Dashboard -->
+            <div id="adminPanel" class="hidden fade-in">
+                <div class="grid md:grid-cols-[260px,1fr] gap-6 md:gap-8 items-start">
+                    <!-- Sidebar -->
+                    <aside class="glass-card rounded-3xl border border-white/80 p-6 space-y-6 shadow-xl">
+                        <div>
+                            <p class="text-xs font-semibold text-gray-500 uppercase">Статус доступа</p>
+                            <h3 class="mt-2 text-lg font-bold text-indigo-600">Администратор
+                                <span class="ml-2 inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-500 rounded-full text-xs">
+                                    <i data-lucide="shield" class="w-3.5 h-3.5"></i>
+                                    Полный доступ
+                                </span>
+                            </h3>
+                        </div>
+
+                        <button id="logoutBtn" class="w-full flex items-center justify-center gap-2 bg-white text-gray-700 font-semibold py-2.5 rounded-2xl border border-gray-200 hover:border-indigo-200 hover:text-indigo-600 transition">
+                            <i data-lucide="log-out" class="w-4 h-4"></i>
+                            Выйти
+                        </button>
+
+                        <div class="pt-4 border-t border-gray-100 space-y-4">
+                            <div>
+                                <p class="text-xs font-semibold text-gray-500 uppercase mb-2">Быстрые действия</p>
+                                <div class="space-y-3">
+                                    <button id="reloadDbBtn" class="w-full flex items-center justify-between gap-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-semibold px-4 py-3 rounded-xl transition">
+                                        <span class="flex items-center gap-2">
+                                            <i data-lucide="database" class="w-4 h-4"></i>
+                                            Перезагрузить базу
+                                        </span>
+                                        <i data-lucide="refresh-ccw" class="w-4 h-4"></i>
+                                    </button>
+                                    <button id="reloadBadgesBtn" class="w-full flex items-center justify-between gap-3 bg-sky-50 hover:bg-sky-100 text-sky-600 font-semibold px-4 py-3 rounded-xl transition">
+                                        <span class="flex items-center gap-2">
+                                            <i data-lucide="award" class="w-4 h-4"></i>
+                                            Обновить бейджи
+                                        </span>
+                                        <i data-lucide="sparkles" class="w-4 h-4"></i>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="bg-gray-50/80 rounded-2xl p-4 border border-gray-100">
+                                <p class="text-xs font-semibold text-gray-500 uppercase mb-2">Статус сервера</p>
+                                <div id="serverStatus" class="text-sm text-gray-700 space-y-1">
+                                    <p class="flex items-center gap-2 text-gray-400">
+                                        <i data-lucide="loader" class="w-4 h-4 animate-spin"></i>
+                                        Загрузка...
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </aside>
+
+                    <!-- Main Content -->
+                    <main class="space-y-6">
+                        <section class="glass-card rounded-3xl border border-white/80 p-6 md:p-8 shadow-xl">
+                            <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+                                <div>
+                                    <h2 class="text-2xl font-semibold text-gray-900">Пользователи</h2>
+                                    <p class="text-gray-500 text-sm">Просматривайте и управляйте пользователями, статусами PRO и бейджами.</p>
+                                </div>
+                                <div class="flex items-center gap-3 bg-gray-100/60 rounded-full px-4 py-2 text-sm text-gray-500">
+                                    <i data-lucide="check-circle" class="w-4 h-4"></i>
+                                    <span id="usersCount">0 пользователей</span>
+                                </div>
+                            </div>
+
+                            <div class="relative">
+                                <i data-lucide="search" class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5"></i>
+                                <input id="searchUser" type="text" class="w-full rounded-2xl border border-transparent bg-gray-100/70 pl-12 pr-4 py-3 text-sm text-gray-700 focus:ring-2 focus:ring-indigo-500 focus:bg-white transition" placeholder="Поиск по email, имени или ID">
+                            </div>
+
+                            <div id="usersList" class="mt-6 space-y-4 max-h-[520px] overflow-y-auto pr-1 scrollbar-hidden">
+                                <div class="p-6 border border-dashed border-gray-200 rounded-2xl text-center text-gray-400">
+                                    <p>Список пользователей будет показан после загрузки.</p>
+                                </div>
+                            </div>
+                        </section>
+                    </main>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        // Принудительно используем HTTPS для всех запросов
         const API_BASE_URL = window.location.origin.replace(/^http:/, 'https:');
-        console.log('Using API base URL:', API_BASE_URL);
         let token = localStorage.getItem('adminToken');
 
-        // Check if already logged in
+        const loginForm = document.getElementById('loginForm');
+        const adminPanel = document.getElementById('adminPanel');
+        const passwordInput = document.getElementById('password');
+        const togglePasswordBtn = document.getElementById('togglePassword');
+        const usersList = document.getElementById('usersList');
+        const usersCount = document.getElementById('usersCount');
+        const searchInput = document.getElementById('searchUser');
+        const serverStatus = document.getElementById('serverStatus');
+
+        const togglePasswordVisibility = () => {
+            const isPassword = passwordInput.type === 'password';
+            passwordInput.type = isPassword ? 'text' : 'password';
+            togglePasswordBtn.innerHTML = isPassword
+                ? '<i data-lucide="eye-off" class="w-5 h-5"></i>'
+                : '<i data-lucide="eye" class="w-5 h-5"></i>';
+            lucide.createIcons();
+        };
+
+        togglePasswordBtn.addEventListener('click', togglePasswordVisibility);
+
         if (token) {
             verifyToken();
-        } else {
-            document.getElementById('loginForm').style.display = 'block';
         }
 
-        // WebSocket connection
         let socket;
-        
+
         function connectWebSocket() {
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${wsProtocol}//${window.location.host}/updates`;
-            console.log('Connecting to WebSocket:', wsUrl);
             socket = new WebSocket(wsUrl);
-            
+
             socket.onerror = (error) => {
                 console.error('WebSocket error:', error);
             };
-            
+
             socket.onclose = (event) => {
                 console.log('WebSocket closed, reconnecting...', event.code, event.reason);
-                setTimeout(connectWebSocket, 3000); // Reconnect after 3 seconds
+                setTimeout(connectWebSocket, 3000);
             };
-            
+
             socket.onmessage = (event) => {
-                console.log('Received WebSocket message:', event.data);
-                const data = JSON.parse(event.data);
-                if (data.type === 'userUpdate') {
-                    loadUsers();
-                } else if (data.type === 'serverStatusUpdate') {
-                    loadServerStatus();
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'userUpdate') {
+                        loadUsers();
+                    } else if (data.type === 'serverStatusUpdate') {
+                        loadServerStatus();
+                    }
+                } catch (error) {
+                    console.error('WebSocket message parse error:', error);
                 }
             };
         }
 
-        // Login form submission
         document.getElementById('loginFormElement').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const password = document.getElementById('password').value;
-            
+            const password = passwordInput.value;
+
             try {
-                console.log('Attempting login to:', `${API_BASE_URL}/admin/login`);
                 const response = await fetch(`${API_BASE_URL}/admin/login`, {
                     method: 'POST',
                     mode: 'cors',
@@ -128,9 +207,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ password })
                 });
-                
+
                 const data = await response.json();
-                
+
                 if (response.ok) {
                     token = data.token;
                     localStorage.setItem('adminToken', token);
@@ -138,77 +217,78 @@
                     loadUsers();
                     loadServerStatus();
                     connectWebSocket();
+                    passwordInput.value = '';
                 } else {
-                    alert(data.message || 'Login failed');
+                    showToast(data.message || 'Ошибка входа', 'error');
                 }
             } catch (error) {
                 console.error('Login error:', error);
-                alert('Error connecting to server');
+                showToast('Не удалось подключиться к серверу', 'error');
             }
         });
 
-        // Logout
         document.getElementById('logoutBtn').addEventListener('click', () => {
             localStorage.removeItem('adminToken');
             token = null;
-            document.getElementById('loginForm').style.display = 'block';
-            document.getElementById('adminPanel').style.display = 'none';
+            adminPanel.classList.add('hidden');
+            loginForm.classList.remove('hidden');
+            showToast('Вы вышли из панели', 'info');
         });
 
-        // Reload DB
         document.getElementById('reloadDbBtn').addEventListener('click', async () => {
-            if (confirm('Are you sure you want to reload the database?')) {
-                try {
-                    const response = await fetch(`${API_BASE_URL}/admin/reload-db`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
-                    });
-                    const data = await response.json();
-                    if (response.ok) {
-                        alert('Database reloaded successfully');
-                        loadUsers();
-                    } else {
-                        alert(data.message || 'Failed to reload database');
-                    }
-                } catch (error) {
-                    console.error('Reload DB error:', error);
-                    alert('Error reloading database');
-                }
+            if (!confirm('Перезагрузить базу данных пользователей?')) {
+                return;
             }
-        });
 
-        // Reload Badges
-        document.getElementById('reloadBadgesBtn').addEventListener('click', async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/admin/reload-badges`, {
+                const response = await fetch(`${API_BASE_URL}/admin/reload-db`, {
+                    method: 'POST',
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 const data = await response.json();
+
                 if (response.ok) {
-                    alert('Badges reloaded successfully');
+                    showToast('База данных перезагружена', 'success');
+                    loadUsers();
                 } else {
-                    alert(data.message || 'Failed to reload badges');
+                    showToast(data.message || 'Не удалось перезагрузить базу', 'error');
                 }
             } catch (error) {
-                console.error('Reload badges error:', error);
-                alert('Error reloading badges');
+                console.error('Reload DB error:', error);
+                showToast('Ошибка подключения при перезагрузке', 'error');
             }
         });
 
-        // Search users
-        document.getElementById('searchUser').addEventListener('input', (e) => {
+        document.getElementById('reloadBadgesBtn').addEventListener('click', async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/reload-badges`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showToast('Бейджи обновлены', 'success');
+                } else {
+                    showToast(data.message || 'Не удалось обновить бейджи', 'error');
+                }
+            } catch (error) {
+                console.error('Reload badges error:', error);
+                showToast('Ошибка подключения при обновлении бейджей', 'error');
+            }
+        });
+
+        searchInput.addEventListener('input', (e) => {
             const searchTerm = e.target.value.toLowerCase();
-            const userCards = document.querySelectorAll('.user-card');
-            
+            const userCards = document.querySelectorAll('[data-user-card="true"]');
+
             userCards.forEach(card => {
                 const email = card.getAttribute('data-email').toLowerCase();
                 const name = card.getAttribute('data-name').toLowerCase();
                 const id = card.getAttribute('data-id').toLowerCase();
-                
-                if (email.includes(searchTerm) || name.includes(searchTerm) || id.includes(searchTerm)) {
-                    card.style.display = '';
-                } else {
-                    card.style.display = 'none';
-                }
+
+                const matches = email.includes(searchTerm) || name.includes(searchTerm) || id.includes(searchTerm);
+                card.classList.toggle('hidden', !matches);
             });
         });
 
@@ -217,25 +297,27 @@
                 const response = await fetch(`${API_BASE_URL}/admin/verify-token`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
-                
+
                 if (response.ok) {
                     showAdminPanel();
                     loadUsers();
                     loadServerStatus();
+                    connectWebSocket();
                 } else {
                     localStorage.removeItem('adminToken');
-                    document.getElementById('loginForm').style.display = 'block';
+                    loginForm.classList.remove('hidden');
                 }
             } catch (error) {
                 console.error('Token verification error:', error);
                 localStorage.removeItem('adminToken');
-                document.getElementById('loginForm').style.display = 'block';
+                loginForm.classList.remove('hidden');
             }
         }
 
         function showAdminPanel() {
-            document.getElementById('loginForm').style.display = 'none';
-            document.getElementById('adminPanel').style.display = 'block';
+            loginForm.classList.add('hidden');
+            adminPanel.classList.remove('hidden');
+            lucide.createIcons();
         }
 
         async function loadUsers() {
@@ -243,99 +325,183 @@
                 const response = await fetch(`${API_BASE_URL}/admin/users`, {
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
-                
+
                 if (!response.ok) {
                     throw new Error('Failed to load users');
                 }
-                
+
                 const users = await response.json();
-                const usersList = document.getElementById('usersList');
                 usersList.innerHTML = '';
-                
+                usersCount.textContent = `${users.length} ${declension(users.length, ['пользователь', 'пользователя', 'пользователей'])}`;
+
                 users.forEach(user => {
                     const userCard = document.createElement('div');
-                    userCard.className = 'card user-card mb-2';
+                    userCard.className = 'border border-gray-100 rounded-2xl p-5 bg-white/90 shadow-sm hover:shadow-md transition flex flex-col md:flex-row md:items-center md:justify-between gap-4';
                     userCard.setAttribute('data-id', user.id);
                     userCard.setAttribute('data-email', user.email);
                     userCard.setAttribute('data-name', user.name);
-                    
+                    userCard.setAttribute('data-user-card', 'true');
+
+                    const badgeMarkup = (user.badges || []).map(badge => `
+                        <span class="inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full bg-sky-100 text-sky-600">
+                            <i data-lucide="medal" class="w-3.5 h-3.5"></i>
+                            ${badge}
+                        </span>
+                    `).join('');
+
                     userCard.innerHTML = `
-                        <div class="card-body">
-                            <div class="d-flex justify-content-between align-items-center">
-                                <div>
-                                    <h5 class="card-title">${user.name}</h5>
-                                    <p class="card-text mb-1">${user.email}</p>
-                                    <p class="card-text text-muted small mb-0">ID: ${user.id} | UID: ${user.uid || 'N/A'}</p>
-                                    <p class="card-text small">
-                                        <span class="badge bg-${user.pro?.status ? 'success' : 'secondary'}">
-                                            ${user.pro?.status ? 'PRO' : 'Free'}
-                                        </span>
-                                        ${user.badges?.length ? user.badges.map(b => 
-                                            `<span class="badge bg-info ms-1">${b}</span>`).join('') : ''}
-                                    </p>
+                        <div class="flex-1">
+                            <div class="flex items-center gap-3">
+                                <div class="w-12 h-12 rounded-full bg-indigo-500/10 text-indigo-500 flex items-center justify-center font-semibold">
+                                    ${getInitials(user.name || user.email)}
                                 </div>
                                 <div>
-                                    <button class="btn btn-sm ${user.pro?.status ? 'btn-outline-danger' : 'btn-outline-success'}" 
-                                            onclick="toggleProStatus(${user.id}, ${!user.pro?.status})">
-                                        ${user.pro?.status ? 'Remove PRO' : 'Make PRO'}
-                                    </button>
+                                    <h3 class="text-lg font-semibold text-gray-900">${escapeHtml(user.name || 'Без имени')}</h3>
+                                    <p class="text-sm text-gray-500">${escapeHtml(user.email)}</p>
                                 </div>
                             </div>
+                            <div class="mt-3 flex flex-wrap items-center gap-3 text-sm text-gray-500">
+                                <span class="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-full">
+                                    <strong>ID:</strong> ${user.id}
+                                </span>
+                                <span class="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 rounded-full">
+                                    <strong>UID:</strong> ${user.uid || '—'}
+                                </span>
+                                <span class="inline-flex items-center gap-1 px-2 py-1 ${user.pro?.status ? 'bg-emerald-100 text-emerald-600' : 'bg-gray-100 text-gray-500'} rounded-full">
+                                    <i data-lucide="zap" class="w-4 h-4"></i>
+                                    ${user.pro?.status ? 'PRO аккаунт' : 'Бесплатный аккаунт'}
+                                </span>
+                                ${badgeMarkup}
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button class="px-4 py-2 rounded-xl border border-indigo-100 text-indigo-600 hover:bg-indigo-50 transition text-sm font-semibold"
+                                data-action="toggle-pro" data-id="${user.id}" data-status="${!user.pro?.status}">
+                                ${user.pro?.status ? 'Снять PRO' : 'Выдать PRO'}
+                            </button>
                         </div>
                     `;
-                    
+
                     usersList.appendChild(userCard);
                 });
-                
-                // Add global function for toggling PRO status
-                window.toggleProStatus = async (userId, makePro) => {
-                    try {
-                        const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/pro`, {
-                            method: 'PUT',
-                            headers: { 
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${token}`
-                            },
-                            body: JSON.stringify({ status: makePro })
-                        });
-                        
-                        const data = await response.json();
-                        
-                        if (response.ok) {
-                            loadUsers();
-                        } else {
-                            alert(data.message || 'Failed to update user status');
-                        }
-                    } catch (error) {
-                        console.error('Update PRO status error:', error);
-                        alert('Error updating user status');
-                    }
-                };
-                
+
+                lucide.createIcons();
             } catch (error) {
                 console.error('Load users error:', error);
-                usersList.innerHTML = '<div class="alert alert-danger">Failed to load users</div>';
+                usersList.innerHTML = '<div class="p-6 border border-red-100 bg-red-50 rounded-2xl text-red-500">Не удалось загрузить пользователей</div>';
             }
         }
+
+        usersList.addEventListener('click', async (event) => {
+            const target = event.target.closest('[data-action="toggle-pro"]');
+            if (!target) {
+                return;
+            }
+
+            const userId = target.getAttribute('data-id');
+            const makePro = target.getAttribute('data-status') === 'true';
+
+            try {
+                target.disabled = true;
+                target.classList.add('opacity-70');
+
+                const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/pro`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ status: makePro })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showToast(`Статус пользователя обновлён: ${makePro ? 'PRO активирован' : 'PRO деактивирован'}`, 'success');
+                    loadUsers();
+                } else {
+                    showToast(data.message || 'Не удалось обновить статус пользователя', 'error');
+                }
+            } catch (error) {
+                console.error('Update PRO status error:', error);
+                showToast('Ошибка при обновлении статуса', 'error');
+            } finally {
+                target.disabled = false;
+                target.classList.remove('opacity-70');
+            }
+        });
 
         async function loadServerStatus() {
             try {
                 const response = await fetch(`${API_BASE_URL}/health`);
                 const status = await response.json();
-                
-                const statusDiv = document.getElementById('serverStatus');
-                statusDiv.innerHTML = `
-                    <p><strong>Status:</strong> <span class="badge bg-success">${status.status}</span></p>
-                    <p><strong>Current Version:</strong> ${status.currentVersion}</p>
-                    <p><strong>Latest Version:</strong> ${status.latestVersion?.version || 'N/A'}</p>
-                    <p><strong>Uptime:</strong> ${status.uptime ? Math.floor(status.uptime / 60) + ' minutes' : 'N/A'}</p>
+
+                serverStatus.innerHTML = `
+                    <div class="space-y-2 text-sm">
+                        <p class="flex items-center gap-2">
+                            <i data-lucide="activity" class="w-4 h-4 text-emerald-500"></i>
+                            <span><strong>Статус:</strong> <span class="text-emerald-500">${status.status}</span></span>
+                        </p>
+                        <p><strong>Текущая версия:</strong> ${status.currentVersion}</p>
+                        <p><strong>Последняя версия:</strong> ${status.latestVersion?.version || '—'}</p>
+                        <p><strong>Аптайм:</strong> ${status.uptime ? Math.floor(status.uptime / 60) + ' мин.' : '—'}</p>
+                    </div>
                 `;
+                lucide.createIcons();
             } catch (error) {
                 console.error('Load status error:', error);
-                document.getElementById('serverStatus').innerHTML = 
-                    '<div class="alert alert-danger">Failed to load server status</div>';
+                serverStatus.innerHTML = '<div class="text-red-500 text-sm">Не удалось загрузить статус сервера</div>';
             }
         }
+
+        function declension(number, titles) {
+            const cases = [2, 0, 1, 1, 1, 2];
+            return titles[(number % 100 > 4 && number % 100 < 20) ? 2 : cases[(number % 10 < 5) ? number % 10 : 5]];
+        }
+
+        function getInitials(name) {
+            if (!name) return 'AI';
+            return name.split(' ').slice(0, 2).map(part => part.charAt(0).toUpperCase()).join('') || 'AI';
+        }
+
+        function escapeHtml(value) {
+            return value?.replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'': '&#39;'}[char] || char)) || '';
+        }
+
+        function showToast(message, type = 'info') {
+            let container = document.getElementById('toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'toast-container';
+                container.className = 'fixed top-6 right-6 space-y-3 z-50';
+                document.body.appendChild(container);
+            }
+
+            const typeClasses = {
+                success: 'bg-emerald-500',
+                error: 'bg-rose-500',
+                info: 'bg-indigo-500'
+            };
+
+            const toast = document.createElement('div');
+            toast.className = `${typeClasses[type] || typeClasses.info} text-white px-4 py-3 rounded-2xl shadow-lg shadow-black/10 flex items-center gap-3 animate-fade-in`;
+            toast.innerHTML = `
+                <i data-lucide="bell" class="w-4 h-4"></i>
+                <span class="text-sm font-semibold">${message}</span>
+            `;
+
+            container.appendChild(toast);
+            lucide.createIcons();
+
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            }, 2600);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            lucide.createIcons();
+        });
     </script>
 </body>
 </html>

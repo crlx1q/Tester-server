@@ -8,6 +8,8 @@ const { WebSocketServer } = require('ws');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const http = require('http');
+const https = require('https');
+const helmet = require('helmet');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -16,17 +18,32 @@ const badgesPath = path.join(__dirname, 'badges.json');
 const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '8h';
+const secureCookie = ((process.env.COOKIE_SECURE || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
 
-const bindHost = process.env.BIND_HOST || '0.0.0.0';
-const bindPort = port;
+const logSecretStatus = (name, value) => {
+  if (value) {
+    console.log(`[BOOT] ${name} secret загружен (${String(value).length} символов)`);
+  } else {
+    console.warn(`[BOOT][WARN] ${name} secret отсутствует. Настройте переменную окружения ${name}.`);
+  }
+};
 
-console.log('Startup configuration:', {
-  nodeEnv: process.env.NODE_ENV || 'development',
-  host: bindHost,
-  port: bindPort,
-  adminPassw: adminPassword ? 'set' : 'MISSING',
-  jwtSecret: JWT_SECRET ? 'set' : 'MISSING',
-});
+logSecretStatus('ADMIN_PASSW', adminPassword);
+logSecretStatus('JWT_SECRET', JWT_SECRET);
+
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
+  'http://localhost:3000'
+];
+
+const configuredOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const allowedOrigins = configuredOrigins.length ? configuredOrigins : DEFAULT_ALLOWED_ORIGINS;
+console.log(`[BOOT] Разрешенные origin: ${allowedOrigins.join(', ')}`);
+console.log(`[BOOT] Флаг secure для cookie: ${secureCookie}`);
 
 const UID_PREFIX = '700';
 const UID_LENGTH = 10;
@@ -242,14 +259,48 @@ const buildUserResponse = (user) => {
 };
 
 // Middleware
-app.use(cors({
-  origin: [
-    'https://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
-    'http://localhost:3000'  // для локальной разработки
-  ],
-  credentials: true
+app.set('trust proxy', Number(process.env.TRUST_PROXY || 1));
+
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
+  referrerPolicy: { policy: 'no-referrer' }
 }));
-app.use(bodyParser.json());
+
+if (process.env.FORCE_HTTPS === 'true') {
+  console.log('[BOOT] Включен режим принудительного HTTPS (FORCE_HTTPS=true).');
+  app.use((req, res, next) => {
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      return next();
+    }
+    const host = req.headers.host;
+    const url = req.originalUrl || req.url;
+    return res.redirect(301, `https://${host}${url}`);
+  });
+
+  app.use(helmet.hsts({
+    maxAge: 60 * 60 * 24 * 365,
+    includeSubDomains: true,
+    preload: true
+  }));
+} else {
+  console.warn('[BOOT] FORCE_HTTPS выключен. HTTP соединения разрешены.');
+}
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    console.warn(`[CORS] Заблокирован запрос с origin: ${origin}`);
+    return callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  optionsSuccessStatus: 204
+}));
+
+app.use(bodyParser.json({ limit: '10mb' }));
 app.use(cookieParser());
 app.use(express.static('public'));
 
@@ -285,9 +336,31 @@ const isAdmin = (req, res, next) => {
 };
 
 // Логирование всех запросов
+const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'token', 'avatarBase64']);
+
+const sanitizeSensitiveData = (value) => {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeSensitiveData);
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.entries(value).reduce((acc, [key, val]) => {
+      acc[key] = SENSITIVE_FIELDS.has(key) ? '[REDACTED]' : sanitizeSensitiveData(val);
+      return acc;
+    }, {});
+  }
+
+  return value;
+};
+
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  console.log('Request body:', req.body);
+  const timestamp = new Date().toISOString();
+  console.log(`${timestamp} - ${req.method} ${req.originalUrl}`);
+
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('Request body:', sanitizeSensitiveData(req.body));
+  }
+
   next();
 });
 
@@ -373,7 +446,7 @@ app.post('/admin/login', (req, res) => {
     
     res.cookie('token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: secureCookie,
       sameSite: 'strict',
       maxAge: 8 * 60 * 60 * 1000 // 8 hours
     });
@@ -706,7 +779,39 @@ app.get('/health', (req, res) => {
   });
 });
 
-const server = http.createServer(app);
+const createServer = () => {
+  const keyPath = process.env.SSL_KEY_PATH;
+  const certPath = process.env.SSL_CERT_PATH;
+  const caPath = process.env.SSL_CA_PATH;
+
+  if (keyPath && certPath) {
+    try {
+      const httpsOptions = {
+        key: fs.readFileSync(path.resolve(keyPath)),
+        cert: fs.readFileSync(path.resolve(certPath)),
+      };
+
+      if (caPath) {
+        try {
+          httpsOptions.ca = fs.readFileSync(path.resolve(caPath));
+        } catch (error) {
+          console.warn('[BOOT][WARN] Не удалось загрузить SSL CA сертификат.', error.message);
+        }
+      }
+
+      console.log('[BOOT] HTTPS сервер инициализирован с пользовательским сертификатом.');
+      return https.createServer(httpsOptions, app);
+    } catch (error) {
+      console.error('[BOOT][ERROR] Не удалось создать HTTPS сервер. Будет использован HTTP.', error);
+    }
+  } else {
+    console.warn('[BOOT] SSL сертификат не настроен (SSL_KEY_PATH/SSL_CERT_PATH). Сервер стартует по HTTP.');
+  }
+
+  return http.createServer(app);
+};
+
+const server = createServer();
 
 // WebSocket Server
 const wss = new WebSocketServer({
@@ -715,8 +820,11 @@ const wss = new WebSocketServer({
   clientTracking: true,
 });
 
-server.listen(bindPort, bindHost, () => {
-  console.log(`Server listening on ${bindHost}:${bindPort} (env: ${process.env.NODE_ENV || 'development'})`);
+const listenHost = process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1';
+const listenPort = process.env.NODE_ENV === 'production' ? port : (process.env.PORT || 3000);
+
+server.listen(listenPort, listenHost, () => {
+  console.log(`Server listening on ${listenHost}:${listenPort} (env: ${process.env.NODE_ENV || 'development'})`);
 });
 
 wss.on('connection', (ws) => {
