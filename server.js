@@ -17,6 +17,17 @@ const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '8h';
 
+const bindHost = process.env.BIND_HOST || '0.0.0.0';
+const bindPort = port;
+
+console.log('Startup configuration:', {
+  nodeEnv: process.env.NODE_ENV || 'development',
+  host: bindHost,
+  port: bindPort,
+  adminPassw: adminPassword ? 'set' : 'MISSING',
+  jwtSecret: JWT_SECRET ? 'set' : 'MISSING',
+});
+
 const UID_PREFIX = '700';
 const UID_LENGTH = 10;
 const UID_RANDOM_LENGTH = UID_LENGTH - UID_PREFIX.length;
@@ -704,11 +715,8 @@ const wss = new WebSocketServer({
   clientTracking: true,
 });
 
-const listenHost = process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1';
-const listenPort = process.env.NODE_ENV === 'production' ? port : (process.env.PORT || 3000);
-
-server.listen(listenPort, listenHost, () => {
-  console.log(`Server listening on ${listenHost}:${listenPort} (env: ${process.env.NODE_ENV || 'development'})`);
+server.listen(bindPort, bindHost, () => {
+  console.log(`Server listening on ${bindHost}:${bindPort} (env: ${process.env.NODE_ENV || 'development'})`);
 });
 
 wss.on('connection', (ws) => {
