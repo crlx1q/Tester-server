@@ -820,7 +820,7 @@ const wss = new WebSocketServer({
   clientTracking: true,
 });
 
-const listenHost = process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1';
+const listenHost = '0.0.0.0';
 const listenPort = process.env.NODE_ENV === 'production' ? port : (process.env.PORT || 3000);
 
 server.listen(listenPort, listenHost, () => {
