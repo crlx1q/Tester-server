@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AIStudyMate Admin</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+        }
+        .login-container {
+            max-width: 400px;
+            margin: 100px auto;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .admin-panel {
+            display: none;
+            margin: 20px auto;
+            max-width: 1000px;
+            padding: 20px;
+        }
+        .user-card {
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Login Form -->
+    <div class="container login-container" id="loginForm">
+        <h2 class="text-center mb-4">Admin Login</h2>
+        <form id="loginFormElement">
+            <div class="mb-3">
+                <label for="password" class="form-label">Password</label>
+                <input type="password" class="form-control" id="password" required>
+            </div>
+            <button type="submit" class="btn btn-primary w-100">Login</button>
+        </form>
+    </div>
+
+    <!-- Admin Panel -->
+    <div class="container admin-panel" id="adminPanel">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2>Admin Panel</h2>
+            <button class="btn btn-danger" id="logoutBtn">Logout</button>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header">
+                <h4>Users</h4>
+                <input type="text" class="form-control mb-2" id="searchUser" placeholder="Search users...">
+            </div>
+            <div class="card-body">
+                <div id="usersList"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h4>System</h4>
+            </div>
+            <div class="card-body">
+                <button class="btn btn-warning" id="reloadDbBtn">Reload Database</button>
+                <button class="btn btn-info" id="reloadBadgesBtn">Reload Badges</button>
+                <div class="mt-3">
+                    <h5>Server Status</h5>
+                    <div id="serverStatus">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE_URL = window.location.origin;
+        let token = localStorage.getItem('adminToken');
+
+        // Check if already logged in
+        if (token) {
+            verifyToken();
+        } else {
+            document.getElementById('loginForm').style.display = 'block';
+        }
+
+        // Login form submission
+        document.getElementById('loginFormElement').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const password = document.getElementById('password').value;
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    token = data.token;
+                    localStorage.setItem('adminToken', token);
+                    showAdminPanel();
+                    loadUsers();
+                    loadServerStatus();
+                } else {
+                    alert(data.message || 'Login failed');
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                alert('Error connecting to server');
+            }
+        });
+
+        // Logout
+        document.getElementById('logoutBtn').addEventListener('click', () => {
+            localStorage.removeItem('adminToken');
+            token = null;
+            document.getElementById('loginForm').style.display = 'block';
+            document.getElementById('adminPanel').style.display = 'none';
+        });
+
+        // Reload DB
+        document.getElementById('reloadDbBtn').addEventListener('click', async () => {
+            if (confirm('Are you sure you want to reload the database?')) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/admin/reload-db`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        alert('Database reloaded successfully');
+                        loadUsers();
+                    } else {
+                        alert(data.message || 'Failed to reload database');
+                    }
+                } catch (error) {
+                    console.error('Reload DB error:', error);
+                    alert('Error reloading database');
+                }
+            }
+        });
+
+        // Reload Badges
+        document.getElementById('reloadBadgesBtn').addEventListener('click', async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/reload-badges`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    alert('Badges reloaded successfully');
+                } else {
+                    alert(data.message || 'Failed to reload badges');
+                }
+            } catch (error) {
+                console.error('Reload badges error:', error);
+                alert('Error reloading badges');
+            }
+        });
+
+        // Search users
+        document.getElementById('searchUser').addEventListener('input', (e) => {
+            const searchTerm = e.target.value.toLowerCase();
+            const userCards = document.querySelectorAll('.user-card');
+            
+            userCards.forEach(card => {
+                const email = card.getAttribute('data-email').toLowerCase();
+                const name = card.getAttribute('data-name').toLowerCase();
+                const id = card.getAttribute('data-id').toLowerCase();
+                
+                if (email.includes(searchTerm) || name.includes(searchTerm) || id.includes(searchTerm)) {
+                    card.style.display = '';
+                } else {
+                    card.style.display = 'none';
+                }
+            });
+        });
+
+        async function verifyToken() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/verify-token`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (response.ok) {
+                    showAdminPanel();
+                    loadUsers();
+                    loadServerStatus();
+                } else {
+                    localStorage.removeItem('adminToken');
+                    document.getElementById('loginForm').style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Token verification error:', error);
+                localStorage.removeItem('adminToken');
+                document.getElementById('loginForm').style.display = 'block';
+            }
+        }
+
+        function showAdminPanel() {
+            document.getElementById('loginForm').style.display = 'none';
+            document.getElementById('adminPanel').style.display = 'block';
+        }
+
+        async function loadUsers() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/users`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to load users');
+                }
+                
+                const users = await response.json();
+                const usersList = document.getElementById('usersList');
+                usersList.innerHTML = '';
+                
+                users.forEach(user => {
+                    const userCard = document.createElement('div');
+                    userCard.className = 'card user-card mb-2';
+                    userCard.setAttribute('data-id', user.id);
+                    userCard.setAttribute('data-email', user.email);
+                    userCard.setAttribute('data-name', user.name);
+                    
+                    userCard.innerHTML = `
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <h5 class="card-title">${user.name}</h5>
+                                    <p class="card-text mb-1">${user.email}</p>
+                                    <p class="card-text text-muted small mb-0">ID: ${user.id} | UID: ${user.uid || 'N/A'}</p>
+                                    <p class="card-text small">
+                                        <span class="badge bg-${user.pro?.status ? 'success' : 'secondary'}">
+                                            ${user.pro?.status ? 'PRO' : 'Free'}
+                                        </span>
+                                        ${user.badges?.length ? user.badges.map(b => 
+                                            `<span class="badge bg-info ms-1">${b}</span>`).join('') : ''}
+                                    </p>
+                                </div>
+                                <div>
+                                    <button class="btn btn-sm ${user.pro?.status ? 'btn-outline-danger' : 'btn-outline-success'}" 
+                                            onclick="toggleProStatus(${user.id}, ${!user.pro?.status})">
+                                        ${user.pro?.status ? 'Remove PRO' : 'Make PRO'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    
+                    usersList.appendChild(userCard);
+                });
+                
+                // Add global function for toggling PRO status
+                window.toggleProStatus = async (userId, makePro) => {
+                    try {
+                        const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/pro`, {
+                            method: 'PUT',
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${token}`
+                            },
+                            body: JSON.stringify({ status: makePro })
+                        });
+                        
+                        const data = await response.json();
+                        
+                        if (response.ok) {
+                            loadUsers();
+                        } else {
+                            alert(data.message || 'Failed to update user status');
+                        }
+                    } catch (error) {
+                        console.error('Update PRO status error:', error);
+                        alert('Error updating user status');
+                    }
+                };
+                
+            } catch (error) {
+                console.error('Load users error:', error);
+                usersList.innerHTML = '<div class="alert alert-danger">Failed to load users</div>';
+            }
+        }
+
+        async function loadServerStatus() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/health`);
+                const status = await response.json();
+                
+                const statusDiv = document.getElementById('serverStatus');
+                statusDiv.innerHTML = `
+                    <p><strong>Status:</strong> <span class="badge bg-success">${status.status}</span></p>
+                    <p><strong>Current Version:</strong> ${status.currentVersion}</p>
+                    <p><strong>Latest Version:</strong> ${status.latestVersion?.version || 'N/A'}</p>
+                    <p><strong>Uptime:</strong> ${status.uptime ? Math.floor(status.uptime / 60) + ' minutes' : 'N/A'}</p>
+                `;
+            } catch (error) {
+                console.error('Load status error:', error);
+                document.getElementById('serverStatus').innerHTML = 
+                    '<div class="alert alert-danger">Failed to load server status</div>';
+            }
+        }
+    </script>
+</body>
+</html>

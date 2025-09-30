@@ -4,11 +4,16 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 const dbPath = path.join(__dirname, 'db.json');
 const badgesPath = path.join(__dirname, 'badges.json');
+const adminPassword = process.env.ADMIN_PASSW;
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = '8h';
 
 const UID_PREFIX = '700';
 const UID_LENGTH = 10;
@@ -223,8 +228,45 @@ const buildUserResponse = (user) => {
   };
 };
 
-app.use(cors());
+// Middleware
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
 app.use(bodyParser.json());
+app.use(cookieParser());
+app.use(express.static('public'));
+
+// Serve admin panel
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin.html'));
+});
+
+// JWT Authentication Middleware
+const authenticateJWT = (req, res, next) => {
+  const token = req.cookies.token || req.headers.authorization?.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ message: 'Authentication required' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ message: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// Admin Authentication Middleware
+const isAdmin = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    next();
+  } else {
+    res.status(403).json({ message: 'Admin access required' });
+  }
+};
 
 // Логирование всех запросов
 app.use((req, res, next) => {
@@ -306,7 +348,80 @@ if (fs.existsSync(packageJsonPath)) {
 
 setInterval(syncServerVersion, 60 * 1000);
 
-// --- Эндпоинты для проверки здоровья сервера ---
+// --- Admin Routes ---
+app.post('/admin/login', (req, res) => {
+  const { password } = req.body;
+  
+  if (password === adminPassword) {
+    const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 8 * 60 * 60 * 1000 // 8 hours
+    });
+    
+    res.json({ success: true, token });
+  } else {
+    res.status(401).json({ success: false, message: 'Invalid password' });
+  }
+});
+
+app.get('/admin/verify-token', authenticateJWT, isAdmin, (req, res) => {
+  res.json({ success: true });
+});
+
+app.get('/admin/users', authenticateJWT, isAdmin, (req, res) => {
+  const users = db.users.map(user => ({
+    ...user,
+    badges: getBadgesForUid(user.uid)
+  }));
+  res.json(users);
+});
+
+app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  const { status } = req.body;
+  
+  const user = db.users.find(u => u.id === userId);
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found' });
+  }
+  
+  user.pro = user.pro || {};
+  user.pro.status = status;
+  user.pro.updatedAt = new Date().toISOString();
+  
+  if (status) {
+    user.pro.startDate = user.pro.startDate || new Date().toISOString();
+  }
+  
+  saveDb();
+  res.json({ success: true, user: buildUserResponse(user) });
+});
+
+app.post('/admin/reload-db', authenticateJWT, isAdmin, (req, res) => {
+  try {
+    reloadDb();
+    res.json({ success: true, message: 'Database reloaded successfully' });
+  } catch (error) {
+    console.error('Reload DB error:', error);
+    res.status(500).json({ success: false, message: 'Failed to reload database' });
+  }
+});
+
+app.post('/admin/reload-badges', authenticateJWT, isAdmin, (req, res) => {
+  try {
+    reloadBadges();
+    res.json({ success: true, message: 'Badges reloaded successfully' });
+  } catch (error) {
+    console.error('Reload badges error:', error);
+    res.status(500).json({ success: false, message: 'Failed to reload badges' });
+  }
+});
+
+// --- Server Health Endpoints ---
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
@@ -561,6 +676,18 @@ app.put('/profile/:userId/password', (req, res) => {
   console.log(`Password updated for user ${user.email}`);
 
   res.status(200).json({ message: 'Пароль успешно изменен' });
+});
+
+// Add server uptime tracking
+const startTime = Date.now();
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'Server is running',
+    currentVersion: serverVersion,
+    latestVersion: latestVersionInfo,
+    uptime: Math.floor((Date.now() - startTime) / 1000) // in seconds
+  });
 });
 
 const server = app.listen(port, '0.0.0.0', () => {
