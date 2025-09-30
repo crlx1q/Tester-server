@@ -1,0 +1,15 @@
+{
+  "name": "ai-study-mate-server",
+  "version": "2.1.5",
+  "description": "Server for AIStudyMate Flutter app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}
