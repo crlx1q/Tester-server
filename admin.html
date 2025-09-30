@@ -37,7 +37,7 @@
                 <label for="password" class="form-label">Password</label>
                 <input type="password" class="form-control" id="password" required>
             </div>
-            <button type="submit" class="btn btn-primary w-100">Login</button>
+            <button id="loginBtn" type="submit" class="btn btn-primary w-100">Login</button>
         </form>
     </div>
 
@@ -61,7 +61,6 @@
         <div class="card">
             <div class="card-header">
                 <h4>System</h4>
-            </div>
             <div class="card-body">
                 <button class="btn btn-warning" id="reloadDbBtn">Reload Database</button>
                 <button class="btn btn-info" id="reloadBadgesBtn">Reload Badges</button>
@@ -74,7 +73,8 @@
     </div>
 
     <script>
-        const API_BASE_URL = window.location.origin;
+        const API_BASE_URL = '';
+        console.log('Using relative API base URL');
         let token = localStorage.getItem('adminToken');
 
         // Check if already logged in
@@ -84,49 +84,168 @@
             document.getElementById('loginForm').style.display = 'block';
         }
 
+        // WebSocket connection
+        let socket;
+        
+        function connectWebSocket() {
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${wsProtocol}//${window.location.host}/updates`;
+            console.log('Connecting to WebSocket:', wsUrl);
+            socket = new WebSocket(wsUrl);
+            
+            socket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+            
+            socket.onclose = (event) => {
+                console.log('WebSocket closed, reconnecting...', event.code, event.reason);
+                setTimeout(connectWebSocket, 3000); // Reconnect after 3 seconds
+            };
+            
+            socket.onmessage = (event) => {
+                console.log('Received WebSocket message:', event.data);
+                const data = JSON.parse(event.data);
+                if (data.type === 'userUpdate') {
+                    loadUsers();
+                } else if (data.type === 'serverStatusUpdate') {
+                    loadServerStatus();
+                }
+            };
+        }
+
+        // Show/hide admin panel
+        function showAdminPanel() {
+            document.getElementById('loginForm').style.display = 'none';
+            document.getElementById('adminPanel').style.display = 'block';
+            document.title = 'Admin Panel - AIStudyMate';
+        }
+
+        // Verify token on page load
+        async function verifyToken() {
+            if (!token) {
+                document.getElementById('loginForm').style.display = 'block';
+                return;
+            }
+
+            try {
+                console.log('Verifying token...');
+                const response = await fetch(`/admin/verify-token`, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                const data = await response.json();
+                console.log('Token verification response:', data);
+                
+                if (data.success) {
+                    console.log('Token is valid, showing admin panel');
+                    showAdminPanel();
+                    loadUsers();
+                    loadServerStatus();
+                    connectWebSocket();
+                } else {
+                    console.log('Token verification failed:', data.message);
+                    localStorage.removeItem('adminToken');
+                    document.getElementById('loginForm').style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Token verification failed:', error);
+                localStorage.removeItem('adminToken');
+                document.getElementById('loginForm').style.display = 'block';
+            }
+        }
+
         // Login form submission
         document.getElementById('loginFormElement').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const password = document.getElementById('password').value;
+            const password = document.getElementById('password').value.trim();
+            const loginBtn = document.getElementById('loginBtn');
+            const loginText = loginBtn ? loginBtn.innerHTML : '';
             
             try {
-                const response = await fetch(`${API_BASE_URL}/admin/login`, {
+                if (loginBtn) {
+                    loginBtn.disabled = true;
+                    loginBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Вход...';
+                }
+                
+                console.log('Attempting login to: /admin/login');
+                const response = await fetch(`/admin/login`, {
                     method: 'POST',
+                    credentials: 'include',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ password })
                 });
                 
                 const data = await response.json();
                 
-                if (response.ok) {
+                if (data.success) {
                     token = data.token;
                     localStorage.setItem('adminToken', token);
                     showAdminPanel();
                     loadUsers();
                     loadServerStatus();
+                    connectWebSocket();
                 } else {
-                    alert(data.message || 'Login failed');
+                    alert(data.message || 'Ошибка входа. Проверьте пароль.');
                 }
             } catch (error) {
                 console.error('Login error:', error);
-                alert('Error connecting to server');
+                alert('Ошибка соединения с сервером. Проверьте консоль для подробностей.');
+            } finally {
+                if (loginBtn) {
+                    loginBtn.disabled = false;
+                    loginBtn.innerHTML = loginText;
+                }
             }
         });
 
         // Logout
-        document.getElementById('logoutBtn').addEventListener('click', () => {
-            localStorage.removeItem('adminToken');
-            token = null;
-            document.getElementById('loginForm').style.display = 'block';
-            document.getElementById('adminPanel').style.display = 'none';
-        });
+        async function logout() {
+            try {
+                // Clear client-side token
+                localStorage.removeItem('adminToken');
+                token = null;
+                
+                // Clear HTTP-only cookie by setting an expired cookie
+                document.cookie = 'token=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+                
+                // Optionally call server-side logout endpoint if you have one
+                await fetch(`/admin/logout`, {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                
+                // Update UI
+                document.getElementById('loginForm').style.display = 'block';
+                document.getElementById('adminPanel').style.display = 'none';
+                document.getElementById('password').value = '';
+                
+                // Notify user
+                alert('Вы успешно вышли из системы.');
+            } catch (error) {
+                console.error('Logout error:', error);
+                alert('Ошибка при выходе из системы. Пожалуйста, очистите куки вручную.');
+            }
+        }
+        
+        // Attach logout handler
+        document.getElementById('logoutBtn').addEventListener('click', logout);
 
         // Reload DB
         document.getElementById('reloadDbBtn').addEventListener('click', async () => {
             if (confirm('Are you sure you want to reload the database?')) {
                 try {
-                    const response = await fetch(`${API_BASE_URL}/admin/reload-db`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
+                    const response = await fetch(`/admin/reload-db`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 
+                            'Authorization': token ? `Bearer ${token}` : '',
+                            'Content-Type': 'application/json'
+                        }
                     });
                     const data = await response.json();
                     if (response.ok) {
@@ -145,8 +264,13 @@
         // Reload Badges
         document.getElementById('reloadBadgesBtn').addEventListener('click', async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/admin/reload-badges`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
+                const response = await fetch(`/admin/reload-badges`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 
+                        'Authorization': token ? `Bearer ${token}` : '',
+                        'Content-Type': 'application/json'
+                    }
                 });
                 const data = await response.json();
                 if (response.ok) {
@@ -178,35 +302,10 @@
             });
         });
 
-        async function verifyToken() {
-            try {
-                const response = await fetch(`${API_BASE_URL}/admin/verify-token`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                
-                if (response.ok) {
-                    showAdminPanel();
-                    loadUsers();
-                    loadServerStatus();
-                } else {
-                    localStorage.removeItem('adminToken');
-                    document.getElementById('loginForm').style.display = 'block';
-                }
-            } catch (error) {
-                console.error('Token verification error:', error);
-                localStorage.removeItem('adminToken');
-                document.getElementById('loginForm').style.display = 'block';
-            }
-        }
-
-        function showAdminPanel() {
-            document.getElementById('loginForm').style.display = 'none';
-            document.getElementById('adminPanel').style.display = 'block';
-        }
-
         async function loadUsers() {
             try {
-                const response = await fetch(`${API_BASE_URL}/admin/users`, {
+                const response = await fetch(`/admin/users`, {
+                    credentials: 'include',
                     headers: { 'Authorization': `Bearer ${token}` }
                 });
                 
@@ -256,8 +355,9 @@
                 // Add global function for toggling PRO status
                 window.toggleProStatus = async (userId, makePro) => {
                     try {
-                        const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/pro`, {
+                        const response = await fetch(`/admin/users/${userId}/pro`, {
                             method: 'PUT',
+                            credentials: 'include',
                             headers: { 
                                 'Content-Type': 'application/json',
                                 'Authorization': `Bearer ${token}`
@@ -286,7 +386,7 @@
 
         async function loadServerStatus() {
             try {
-                const response = await fetch(`${API_BASE_URL}/health`);
+                const response = await fetch(`/health`);
                 const status = await response.json();
                 
                 const statusDiv = document.getElementById('serverStatus');
