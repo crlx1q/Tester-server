@@ -231,32 +231,14 @@ const buildUserResponse = (user) => {
 };
 
 // Middleware
-const corsOptions = {
-  origin: function (origin, callback) {
-    const allowedOrigins = [
-      'https://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
-      'http://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
-      'http://localhost:3000',
-      'http://localhost:8000'
-    ];
-    
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-      return callback(new Error(msg), false);
-    }
-    
-    return callback(null, true);
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Enable pre-flight for all routes
+app.use(cors({
+  origin: [
+    'https://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
+    'http://localhost:3000'  // для локальной разработки
+  ],
+  credentials: true
+}));
+app.use(bodyParser.json());
 app.use(cookieParser());
 app.use(express.static('public'));
 
@@ -267,35 +249,21 @@ app.get('/admin', (req, res) => {
 
 // JWT Authentication Middleware
 const authenticateJWT = (req, res, next) => {
-  // Try to get token from cookies first, then from Authorization header
-  const token = req.cookies?.token || (req.headers.authorization && req.headers.authorization.split(' ')[1]);
-  
-  console.log('Auth check:', {
-    cookies: req.cookies,
-    authHeader: req.headers.authorization,
-    token: token ? 'present' : 'missing'
-  });
-  
+  const token = req.cookies.token || req.headers.authorization?.split(' ')[1];
+
   if (!token) {
-    console.log('No token provided');
-    return res.status(401).json({ message: 'No token provided' });
+    return res.status(401).json({ message: 'Authentication required' });
   }
 
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    console.log('JWT verified successfully:', { userId: decoded.userId, role: decoded.role });
-    req.user = decoded;
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ message: 'Invalid or expired token' });
+    }
+    req.user = user;
     next();
-  } catch (error) {
-    console.error('JWT verification failed:', error);
-    // Clear invalid token
-    res.clearCookie('token');
-    return res.status(403).json({ 
-      message: 'Invalid or expired token',
-      error: error.message 
-    });
-  }
+  });
 };
+
 // Admin Authentication Middleware
 const isAdmin = (req, res, next) => {
   if (req.user && req.user.role === 'admin') {
@@ -385,63 +353,28 @@ if (fs.existsSync(packageJsonPath)) {
 
 setInterval(syncServerVersion, 60 * 1000);
 
-// --- Admin login
+// --- Admin Routes ---
 app.post('/admin/login', (req, res) => {
   const { password } = req.body;
   
   if (password === adminPassword) {
-    const token = jwt.sign(
-      { 
-        role: 'admin',
-        timestamp: Date.now()
-      },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
+    const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
     
-    // Set HTTP-only secure cookie
     res.cookie('token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production', // Use secure in production
-      sameSite: 'lax', // CSRF protection
-      maxAge: 8 * 60 * 60 * 1000, // 8 hours
-      path: '/',
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 8 * 60 * 60 * 1000 // 8 hours
     });
     
-    console.log('Admin login successful');
-    res.json({ 
-      success: true, 
-      message: 'Login successful',
-      token // Still send token in response for client-side use if needed
-    });
+    res.json({ success: true, token });
   } else {
     res.status(401).json({ success: false, message: 'Invalid password' });
   }
 });
 
-// Verify admin token
 app.get('/admin/verify-token', authenticateJWT, isAdmin, (req, res) => {
-  res.json({ 
-    success: true,
-    user: {
-      role: req.user.role,
-      timestamp: new Date(req.user.timestamp).toISOString()
-    }
-  });
-});
-
-// Admin logout
-app.post('/admin/logout', (req, res) => {
-  // Clear the HTTP-only cookie
-  res.clearCookie('token', {
-    path: '/',
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax'
-  });
-  
-  console.log('Admin logged out');
-  res.json({ success: true, message: 'Logged out successfully' });
+  res.json({ success: true });
 });
 
 app.get('/admin/users', authenticateJWT, isAdmin, (req, res) => {
@@ -765,25 +698,18 @@ app.get('/health', (req, res) => {
 const server = http.createServer(app);
 
 // WebSocket Server
-const wss = new WebSocketServer({ 
-  server, 
+const wss = new WebSocketServer({
+  server,
   path: '/updates',
-  clientTracking: true
+  clientTracking: true,
 });
 
-// Запуск сервера
-if (process.env.NODE_ENV === 'production') {
-  // Для продакшена на Koyeb
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`Production server is running on port ${port}`);
-  });
-} else {
-  // Для локальной разработки достаточно HTTP
-  const devPort = process.env.DEV_PORT || 3000;
-  server.listen(devPort, () => {
-    console.log(`Development server is running on http://localhost:${devPort}`);
-  });
-}
+const listenHost = process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1';
+const listenPort = process.env.NODE_ENV === 'production' ? port : (process.env.PORT || 3000);
+
+server.listen(listenPort, listenHost, () => {
+  console.log(`Server listening on ${listenHost}:${listenPort} (env: ${process.env.NODE_ENV || 'development'})`);
+});
 
 wss.on('connection', (ws) => {
   clients.add(ws);
