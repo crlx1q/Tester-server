@@ -11,7 +11,6 @@ const http = require('http');
 const https = require('https');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const bcrypt = require('bcryptjs');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -21,13 +20,6 @@ const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '8h';
 const secureCookie = ((process.env.COOKIE_SECURE || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
-const forceHttps = ((process.env.FORCE_HTTPS || 'true')).toLowerCase() === 'true';
-const SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS || 12);
-const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'token';
-
-if (!JWT_SECRET) {
-  throw new Error('[BOOT][FATAL] JWT_SECRET не задан. Добавьте JWT_SECRET в переменные окружения.');
-}
 
 const logSecretStatus = (name, value) => {
   if (value) {
@@ -39,51 +31,6 @@ const logSecretStatus = (name, value) => {
 
 logSecretStatus('ADMIN_PASSW', adminPassword);
 logSecretStatus('JWT_SECRET', JWT_SECRET);
-
-const isBcryptHash = (value) => typeof value === 'string' && value.startsWith('$2');
-const hashPasswordSync = (password) => bcrypt.hashSync(password, SALT_ROUNDS);
-const buildUserTokenPayload = (user) => ({
-  id: user.id,
-  email: user.email,
-  role: 'user'
-});
-const setAuthCookie = (res, token, options = {}) => {
-  if (!token) {
-    return;
-  }
-
-  const {
-    sameSite = 'lax',
-    path = '/',
-    maxAge = 8 * 60 * 60 * 1000
-  } = options;
-
-  res.cookie(AUTH_COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: secureCookie,
-    sameSite,
-    maxAge,
-    path
-  });
-};
-const clearAuthCookie = (res) => {
-  res.clearCookie(AUTH_COOKIE_NAME, {
-    httpOnly: true,
-    secure: secureCookie,
-    sameSite: 'lax',
-    path: '/'
-  });
-};
-const sanitizeUserForLog = (user) => {
-  if (!user) {
-    return null;
-  }
-  return {
-    id: user.id,
-    email: user.email,
-    uid: user.uid
-  };
-};
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
@@ -225,40 +172,12 @@ const saveDb = () => {
   }
 };
 
-const ensurePasswordIsHashed = (user) => {
-  if (!user || !user.password) {
-    return false;
-  }
-
-  if (isBcryptHash(user.password)) {
-    return false;
-  }
-
-  try {
-    user.password = hashPasswordSync(user.password);
-    return true;
-  } catch (error) {
-    console.error(`[BOOT][ERROR] Не удалось хешировать пароль пользователя ${user.email}:`, error);
-    return false;
-  }
-};
-
 const initializeUsers = () => {
   usedUids.clear();
   let hasChanges = false;
 
   db.users.forEach((user) => {
-    let userModified = false;
-
     if (normalizeUser(user)) {
-      userModified = true;
-    }
-
-    if (ensurePasswordIsHashed(user)) {
-      userModified = true;
-    }
-
-    if (userModified) {
       hasChanges = true;
     }
   });
@@ -333,7 +252,7 @@ const getBadgesForUid = (uid) => {
 };
 
 const buildUserResponse = (user) => {
-  const { password: _ignored, ...userResponse } = user;
+  const { password: _, ...userResponse } = user;
   return {
     ...userResponse,
     badges: getBadgesForUid(user.uid),
@@ -350,7 +269,7 @@ app.use(helmet({
   referrerPolicy: { policy: 'no-referrer' }
 }));
 
-if (forceHttps) {
+if (process.env.FORCE_HTTPS === 'true') {
   console.log('[BOOT] Включен режим принудительного HTTPS (FORCE_HTTPS=true).');
   app.use((req, res, next) => {
     if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
@@ -367,7 +286,7 @@ if (forceHttps) {
     preload: true
   }));
 } else {
-  console.warn('[BOOT][WARN] FORCE_HTTPS=false. HTTP соединения разрешены и пароли будут отправляться без шифрования.');
+  console.warn('[BOOT] FORCE_HTTPS выключен. HTTP соединения разрешены.');
 }
 
 app.use(cors({
@@ -418,69 +337,34 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
-const requireRole = (...roles) => (req, res, next) => {
-  if (!req.user) {
-    return res.status(401).json({ message: 'Authentication required' });
-  }
-
-  if (!roles.includes(req.user.role)) {
-    return res.status(403).json({ message: 'Access denied' });
-  }
-
-  return next();
-};
-
-const requireSelfOrAdmin = (extractUserId) => (req, res, next) => {
-  if (!req.user) {
-    return res.status(401).json({ message: 'Authentication required' });
-  }
-
-  const rawUserId = extractUserId(req);
-  const targetUserId = rawUserId !== undefined && rawUserId !== null ? Number(rawUserId) : undefined;
-
-  if (!Number.isInteger(targetUserId)) {
-    if (req.user.role === 'user' && Number.isInteger(req.user.id)) {
-      return next();
-    }
-    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
-  }
-
-  if (req.user.role === 'admin' || Number(req.user.id) === targetUserId) {
-    return next();
-  }
-
-  return res.status(403).json({ message: 'Доступ разрешен только владельцу аккаунта' });
-};
-
 // JWT Authentication Middleware
 const authenticateJWT = (req, res, next) => {
-  const cookieToken = req.cookies?.[AUTH_COOKIE_NAME];
-  const authHeader = req.headers.authorization;
-  const headerToken = typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
-    ? authHeader.substring(7)
-    : undefined;
-
-  const token = cookieToken || headerToken;
+  const token = req.cookies.token || req.headers.authorization?.split(' ')[1];
 
   if (!token) {
     return res.status(401).json({ message: 'Authentication required' });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, payload) => {
+  jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
       return res.status(403).json({ message: 'Invalid or expired token' });
     }
-    req.user = payload;
-    req.authToken = token;
+    req.user = user;
     next();
   });
 };
 
 // Admin Authentication Middleware
-const isAdmin = requireRole('admin');
+const isAdmin = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    next();
+  } else {
+    res.status(403).json({ message: 'Admin access required' });
+  }
+};
 
 // Логирование всех запросов
-const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'token', 'authToken', 'avatarBase64']);
+const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'token', 'avatarBase64']);
 
 const sanitizeSensitiveData = (value) => {
   if (Array.isArray(value)) {
@@ -496,10 +380,6 @@ const sanitizeSensitiveData = (value) => {
 
   return value;
 };
-
-const issueJwtToken = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-const issueUserToken = (user) => issueJwtToken(buildUserTokenPayload(user));
-const issueAdminToken = () => issueJwtToken({ role: 'admin' });
 
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
@@ -590,9 +470,15 @@ app.post('/admin/login', (req, res) => {
   const { password } = req.body;
   
   if (password === adminPassword) {
-    const token = issueAdminToken();
-    setAuthCookie(res, token, { sameSite: 'strict' });
-
+    const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: secureCookie,
+      sameSite: 'strict',
+      maxAge: 8 * 60 * 60 * 1000 // 8 hours
+    });
+    
     res.json({ success: true, token });
   } else {
     res.status(401).json({ success: false, message: 'Invalid password' });
@@ -737,12 +623,10 @@ app.post('/auth/register', authLimiter, (req, res) => {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
-  const hashedPassword = hashPasswordSync(password);
-
   const newUser = {
     id: db.userIdCounter,
     email: trimmedEmail,
-    password: hashedPassword,
+    password, // В реальном приложении пароли нужно хешировать!
     name: trimmedName,
     avatarUrl: '', // Поле для будущей аватарки
     pro: {
@@ -757,17 +641,13 @@ app.post('/auth/register', authLimiter, (req, res) => {
   db.userIdCounter += 1;
   db.users.push(newUser);
   saveDb();
-  console.log('New user registered:', sanitizeUserForLog(newUser));
+  console.log('New user registered:', newUser);
+  console.log('All users:', db.users);
 
   registrationCodes.delete(trimmedEmail.toLowerCase());
 
-  const token = issueUserToken(newUser);
-  setAuthCookie(res, token);
-
-  res.status(201).json({
-    user: buildUserResponse(newUser),
-    token
-  });
+  // Отправляем пользователя без пароля
+  res.status(201).json(buildUserResponse(newUser));
 });
 
 app.post('/auth/request-code', codeLimiter, (req, res) => {
@@ -809,32 +689,22 @@ app.post('/auth/login', authLimiter, (req, res) => {
     return res.status(400).json({ message: 'Email и пароль обязательны для заполнения' });
   }
 
-  const user = db.users.find(user => user.email === email);
+  const user = db.users.find(user => user.email === email && user.password === password);
 
-  if (!user || !bcrypt.compareSync(password, user.password || '')) {
+  if (!user) {
     return res.status(401).json({ message: 'Неверный email или пароль' });
   }
   
-  console.log('User logged in:', sanitizeUserForLog(user));
+  console.log('User logged in:', user);
 
-  const token = issueUserToken(user);
-  setAuthCookie(res, token);
-
-  res.status(200).json({
-    user: buildUserResponse(user),
-    token
-  });
-});
-
-app.post('/auth/logout', authenticateJWT, (req, res) => {
-  clearAuthCookie(res);
-  res.status(200).json({ message: 'Вы вышли из аккаунта' });
+  // Отправляем пользователя без пароля
+  res.status(200).json(buildUserResponse(user));
 });
 
 // --- Эндпоинты для работы с профилем ---
 
 // Обновление аватарки пользователя
-app.post('/profile/avatar', authenticateJWT, requireSelfOrAdmin((req) => req.body?.userId), (req, res) => {
+app.post('/profile/avatar', (req, res) => {
   const { userId, avatarBase64 } = req.body;
 
   if (!userId || !avatarBase64) {
@@ -857,7 +727,7 @@ app.post('/profile/avatar', authenticateJWT, requireSelfOrAdmin((req) => req.bod
 });
 
 // Получение данных пользователя по ID
-app.get('/profile/:userId', authenticateJWT, requireSelfOrAdmin((req) => req.params?.userId), (req, res) => {
+app.get('/profile/:userId', (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   
   const user = db.users.find(user => user.id === userId);
@@ -870,7 +740,7 @@ app.get('/profile/:userId', authenticateJWT, requireSelfOrAdmin((req) => req.par
 });
 
 // Обновление профиля пользователя (имя)
-app.put('/profile/:userId', authenticateJWT, requireSelfOrAdmin((req) => req.params?.userId), (req, res) => {
+app.put('/profile/:userId', (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   const { name } = req.body;
 
@@ -894,7 +764,7 @@ app.put('/profile/:userId', authenticateJWT, requireSelfOrAdmin((req) => req.par
 });
 
 // Смена пароля пользователя
-app.put('/profile/:userId/password', authenticateJWT, requireSelfOrAdmin((req) => req.params?.userId), (req, res) => {
+app.put('/profile/:userId/password', (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   const { currentPassword, newPassword } = req.body;
 
@@ -912,13 +782,12 @@ app.put('/profile/:userId/password', authenticateJWT, requireSelfOrAdmin((req) =
   }
 
   // Проверяем текущий пароль
-  const isCurrentValid = bcrypt.compareSync(currentPassword, user.password || '');
-  if (!isCurrentValid) {
+  if (user.password !== currentPassword) {
     return res.status(401).json({ message: 'Неверный текущий пароль' });
   }
 
   // Обновляем пароль
-  user.password = hashPasswordSync(newPassword);
+  user.password = newPassword;
   saveDb();
   
   console.log(`Password updated for user ${user.email}`);
