@@ -463,17 +463,6 @@ const sanitizeSensitiveData = (value) => {
   return value;
 };
 
-app.use((req, res, next) => {
-  const timestamp = new Date().toISOString();
-  console.log(`${timestamp} - ${req.method} ${req.originalUrl}`);
-
-  if (req.body && Object.keys(req.body).length > 0) {
-    console.log('Request body:', sanitizeSensitiveData(req.body));
-  }
-
-  next();
-});
-
 const issueJwtToken = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 const issueUserToken = (user) => issueJwtToken(buildUserTokenPayload(user));
 const issueAdminToken = () => issueJwtToken({ role: 'admin' });
@@ -511,6 +500,17 @@ const requireSelfOrAdmin = (extractUserId) => (req, res, next) => {
 
   return res.status(403).json({ message: 'Доступ разрешен только владельцу аккаунта' });
 };
+
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`${timestamp} - ${req.method} ${req.originalUrl}`);
+
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('Request body:', sanitizeSensitiveData(req.body));
+  }
+
+  next();
+});
 
 // --- Управление версиями приложения ---
 const packageJsonPath = path.join(__dirname, 'package.json');
