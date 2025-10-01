@@ -11,6 +11,7 @@ const http = require('http');
 const https = require('https');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -20,6 +21,39 @@ const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '8h';
 const secureCookie = ((process.env.COOKIE_SECURE || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
+const BCRYPT_ROUNDS = Number.parseInt(process.env.BCRYPT_ROUNDS, 10) || 10;
+
+const HASH_PREFIXES = ['$2a$', '$2b$', '$2y$'];
+const isPasswordHashed = (password) => typeof password === 'string' && HASH_PREFIXES.some((prefix) => password.startsWith(prefix));
+
+const ensureUserPasswordHash = (user) => {
+  if (user.password && !isPasswordHashed(user.password)) {
+    user.password = bcrypt.hashSync(user.password, BCRYPT_ROUNDS);
+    return true;
+  }
+  return false;
+};
+
+const createUserToken = (user) => {
+  if (!JWT_SECRET) {
+    throw new Error('JWT_SECRET is not configured');
+  }
+  return jwt.sign({
+    id: user.id,
+    email: user.email,
+    uid: user.uid,
+    role: user.role || 'user',
+  }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+};
+
+const setAuthCookie = (res, token) => {
+  res.cookie('token', token, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: 'lax',
+    maxAge: 8 * 60 * 60 * 1000,
+  });
+};
 
 const logSecretStatus = (name, value) => {
   if (value) {
@@ -180,6 +214,14 @@ const initializeUsers = () => {
     if (normalizeUser(user)) {
       hasChanges = true;
     }
+
+    try {
+      if (ensureUserPasswordHash(user)) {
+        hasChanges = true;
+      }
+    } catch (error) {
+      console.error(`[BOOT][WARN] Не удалось хешировать пароль пользователя ${user.email}:`, error);
+    }
   });
 
   if (hasChanges) {
@@ -259,6 +301,48 @@ const buildUserResponse = (user) => {
   };
 };
 
+const parseUserId = (value) => {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const ensureAuthorizedForUser = (extractUserId) => (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Требуется аутентификация' });
+  }
+
+  if (req.user.role === 'admin') {
+    return next();
+  }
+
+  const requestedUserId = extractUserId(req);
+  const targetUserId = requestedUserId ?? req.user.id;
+
+  if (targetUserId === null || targetUserId === undefined) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
+
+  if (req.user.id !== targetUserId) {
+    return res.status(403).json({ message: 'Недостаточно прав для выполнения операции' });
+  }
+
+  req.targetUserId = targetUserId;
+  return next();
+};
+
+const ensureAuthorizedByBodyUserId = ensureAuthorizedForUser((req) => {
+  if (req.body && req.body.userId !== undefined) {
+    return parseUserId(req.body.userId);
+  }
+  return req.user?.id ?? null;
+});
+
+const ensureAuthorizedByParamUserId = ensureAuthorizedForUser((req) => parseUserId(req.params.userId));
+
 // Middleware
 app.set('trust proxy', Number(process.env.TRUST_PROXY || 1));
 
@@ -269,8 +353,10 @@ app.use(helmet({
   referrerPolicy: { policy: 'no-referrer' }
 }));
 
-if (process.env.FORCE_HTTPS === 'true') {
-  console.log('[BOOT] Включен режим принудительного HTTPS (FORCE_HTTPS=true).');
+const forceHttps = ((process.env.FORCE_HTTPS || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
+
+if (forceHttps) {
+  console.log('[BOOT] Включен режим принудительного HTTPS.');
   app.use((req, res, next) => {
     if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
       return next();
@@ -286,7 +372,7 @@ if (process.env.FORCE_HTTPS === 'true') {
     preload: true
   }));
 } else {
-  console.warn('[BOOT] FORCE_HTTPS выключен. HTTP соединения разрешены.');
+  console.warn('[BOOT] Принудительный HTTPS отключен. HTTP соединения разрешены (FORCE_HTTPS=false, NODE_ENV!=production).');
 }
 
 app.use(cors({
@@ -623,10 +709,12 @@ app.post('/auth/register', authLimiter, (req, res) => {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
+  const hashedPassword = bcrypt.hashSync(password, BCRYPT_ROUNDS);
+
   const newUser = {
     id: db.userIdCounter,
     email: trimmedEmail,
-    password, // В реальном приложении пароли нужно хешировать!
+    password: hashedPassword,
     name: trimmedName,
     avatarUrl: '', // Поле для будущей аватарки
     pro: {
@@ -636,6 +724,7 @@ app.post('/auth/register', authLimiter, (req, res) => {
     },
     uid: generateUid(),
     createdAt: new Date().toISOString(),
+    role: 'user',
   };
 
   db.userIdCounter += 1;
@@ -646,8 +735,15 @@ app.post('/auth/register', authLimiter, (req, res) => {
 
   registrationCodes.delete(trimmedEmail.toLowerCase());
 
-  // Отправляем пользователя без пароля
-  res.status(201).json(buildUserResponse(newUser));
+  const token = createUserToken(newUser);
+  setAuthCookie(res, token);
+
+  const responsePayload = {
+    ...buildUserResponse(newUser),
+    token,
+  };
+
+  res.status(201).json(responsePayload);
 });
 
 app.post('/auth/request-code', codeLimiter, (req, res) => {
@@ -689,29 +785,53 @@ app.post('/auth/login', authLimiter, (req, res) => {
     return res.status(400).json({ message: 'Email и пароль обязательны для заполнения' });
   }
 
-  const user = db.users.find(user => user.email === email && user.password === password);
+  const trimmedEmail = email.trim();
+  const user = db.users.find((candidate) => candidate.email === trimmedEmail);
 
   if (!user) {
     return res.status(401).json({ message: 'Неверный email или пароль' });
   }
-  
-  console.log('User logged in:', user);
 
-  // Отправляем пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  const passwordMatches = bcrypt.compareSync(password, user.password);
+
+  if (!passwordMatches) {
+    return res.status(401).json({ message: 'Неверный email или пароль' });
+  }
+
+  console.log('User logged in:', { id: user.id, email: user.email });
+
+  const token = createUserToken(user);
+  setAuthCookie(res, token);
+
+  const responsePayload = {
+    ...buildUserResponse(user),
+    token,
+  };
+
+  res.status(200).json(responsePayload);
+});
+
+app.post('/auth/logout', authenticateJWT, (req, res) => {
+  res.clearCookie('token', {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: 'lax',
+  });
+
+  res.status(200).json({ message: 'Вы вышли из аккаунта' });
 });
 
 // --- Эндпоинты для работы с профилем ---
 
 // Обновление аватарки пользователя
-app.post('/profile/avatar', (req, res) => {
-  const { userId, avatarBase64 } = req.body;
+app.post('/profile/avatar', authenticateJWT, ensureAuthorizedByBodyUserId, (req, res) => {
+  const { avatarBase64 } = req.body;
 
-  if (!userId || !avatarBase64) {
-    return res.status(400).json({ message: 'ID пользователя и данные аватарки обязательны' });
+  if (!avatarBase64) {
+    return res.status(400).json({ message: 'Данные аватарки обязательны' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  const user = db.users.find(user => user.id === req.targetUserId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
@@ -727,10 +847,8 @@ app.post('/profile/avatar', (req, res) => {
 });
 
 // Получение данных пользователя по ID
-app.get('/profile/:userId', (req, res) => {
-  const userId = parseInt(req.params.userId, 10);
-  
-  const user = db.users.find(user => user.id === userId);
+app.get('/profile/:userId', authenticateJWT, ensureAuthorizedByParamUserId, (req, res) => {
+  const user = db.users.find(user => user.id === req.targetUserId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
@@ -740,15 +858,14 @@ app.get('/profile/:userId', (req, res) => {
 });
 
 // Обновление профиля пользователя (имя)
-app.put('/profile/:userId', (req, res) => {
-  const userId = parseInt(req.params.userId, 10);
+app.put('/profile/:userId', authenticateJWT, ensureAuthorizedByParamUserId, (req, res) => {
   const { name } = req.body;
 
   if (!name || name.trim().length === 0) {
     return res.status(400).json({ message: 'Имя обязательно для заполнения' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  const user = db.users.find(user => user.id === req.targetUserId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
@@ -764,8 +881,7 @@ app.put('/profile/:userId', (req, res) => {
 });
 
 // Смена пароля пользователя
-app.put('/profile/:userId/password', (req, res) => {
-  const userId = parseInt(req.params.userId, 10);
+app.put('/profile/:userId/password', authenticateJWT, ensureAuthorizedByParamUserId, (req, res) => {
   const { currentPassword, newPassword } = req.body;
 
   if (!currentPassword || !newPassword) {
@@ -776,18 +892,20 @@ app.put('/profile/:userId/password', (req, res) => {
     return res.status(400).json({ message: 'Новый пароль должен содержать минимум 6 символов' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  const user = db.users.find(user => user.id === req.targetUserId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
   // Проверяем текущий пароль
-  if (user.password !== currentPassword) {
+  const passwordMatches = bcrypt.compareSync(currentPassword, user.password);
+
+  if (!passwordMatches) {
     return res.status(401).json({ message: 'Неверный текущий пароль' });
   }
 
   // Обновляем пароль
-  user.password = newPassword;
+  user.password = bcrypt.hashSync(newPassword, BCRYPT_ROUNDS);
   saveDb();
   
   console.log(`Password updated for user ${user.email}`);
