@@ -418,6 +418,40 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'admin.html'));
 });
 
+const requireRole = (...roles) => (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Authentication required' });
+  }
+
+  if (!roles.includes(req.user.role)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
+  return next();
+};
+
+const requireSelfOrAdmin = (extractUserId) => (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ message: 'Authentication required' });
+  }
+
+  const rawUserId = extractUserId(req);
+  const targetUserId = rawUserId !== undefined && rawUserId !== null ? Number(rawUserId) : undefined;
+
+  if (!Number.isInteger(targetUserId)) {
+    if (req.user.role === 'user' && Number.isInteger(req.user.id)) {
+      return next();
+    }
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
+
+  if (req.user.role === 'admin' || Number(req.user.id) === targetUserId) {
+    return next();
+  }
+
+  return res.status(403).json({ message: 'Доступ разрешен только владельцу аккаунта' });
+};
+
 // JWT Authentication Middleware
 const authenticateJWT = (req, res, next) => {
   const cookieToken = req.cookies?.[AUTH_COOKIE_NAME];
@@ -466,40 +500,6 @@ const sanitizeSensitiveData = (value) => {
 const issueJwtToken = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 const issueUserToken = (user) => issueJwtToken(buildUserTokenPayload(user));
 const issueAdminToken = () => issueJwtToken({ role: 'admin' });
-
-const requireRole = (...roles) => (req, res, next) => {
-  if (!req.user) {
-    return res.status(401).json({ message: 'Authentication required' });
-  }
-
-  if (!roles.includes(req.user.role)) {
-    return res.status(403).json({ message: 'Access denied' });
-  }
-
-  return next();
-};
-
-const requireSelfOrAdmin = (extractUserId) => (req, res, next) => {
-  if (!req.user) {
-    return res.status(401).json({ message: 'Authentication required' });
-  }
-
-  const rawUserId = extractUserId(req);
-  const targetUserId = rawUserId !== undefined && rawUserId !== null ? Number(rawUserId) : undefined;
-
-  if (!Number.isInteger(targetUserId)) {
-    if (req.user.role === 'user' && Number.isInteger(req.user.id)) {
-      return next();
-    }
-    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
-  }
-
-  if (req.user.role === 'admin' || Number(req.user.id) === targetUserId) {
-    return next();
-  }
-
-  return res.status(403).json({ message: 'Доступ разрешен только владельцу аккаунта' });
-};
 
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
