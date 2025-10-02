@@ -11,6 +11,7 @@ const http = require('http');
 const https = require('https');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcryptjs');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,8 +19,17 @@ const dbPath = path.join(__dirname, 'db.json');
 const badgesPath = path.join(__dirname, 'badges.json');
 const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = '8h';
+const ADMIN_JWT_EXPIRES_IN = '8h';
+const USER_JWT_EXPIRES_IN = '12h';
 const secureCookie = ((process.env.COOKIE_SECURE || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
+const DEFAULT_PASSWORD_SALT_ROUNDS = Number.parseInt(process.env.PASSWORD_SALT_ROUNDS || '12', 10);
+const FORCE_HTTPS = (process.env.FORCE_HTTPS || 'true').toLowerCase() === 'true';
+const EXPOSE_DEBUG_CODES = (process.env.EXPOSE_DEBUG_CODES || '').toLowerCase() === 'true';
+
+if (!JWT_SECRET) {
+  console.error('[BOOT][ERROR] JWT_SECRET отсутствует. Установите переменную окружения JWT_SECRET.');
+  process.exit(1);
+}
 
 const logSecretStatus = (name, value) => {
   if (value) {
@@ -29,8 +39,104 @@ const logSecretStatus = (name, value) => {
   }
 };
 
-logSecretStatus('ADMIN_PASSW', adminPassword);
-logSecretStatus('JWT_SECRET', JWT_SECRET);
+logSecretStatus('ADMIN_PASSW', adminPassword ? '***' : '');
+logSecretStatus('JWT_SECRET', JWT_SECRET ? '***' : '');
+
+const adminPasswordHash = process.env.ADMIN_PASSW_BCRYPT;
+if (!adminPassword && !adminPasswordHash) {
+  console.warn('[BOOT][WARN] ADMIN_PASSW или ADMIN_PASSW_BCRYPT не заданы. Админ вход будет невозможен.');
+}
+
+let plainAdminPasswordWarningShown = false;
+
+const isPasswordHashed = (value) => typeof value === 'string' && value.startsWith('$2');
+const hashPassword = (password) => bcrypt.hashSync(password, DEFAULT_PASSWORD_SALT_ROUNDS);
+const verifyPassword = (password, hash) => {
+  if (!password || !hash) {
+    return false;
+  }
+  try {
+    return bcrypt.compareSync(password, hash);
+  } catch (error) {
+    console.error('[SECURITY][ERROR] Ошибка при сравнении пароля.', error);
+    return false;
+  }
+};
+
+const compareStoredPassword = (storedPassword, inputPassword) => {
+  if (!storedPassword) {
+    return false;
+  }
+
+  if (isPasswordHashed(storedPassword)) {
+    return verifyPassword(inputPassword, storedPassword);
+  }
+
+  return storedPassword === inputPassword;
+};
+
+const assignHashedPassword = (user, newPassword) => {
+  user.password = hashPassword(newPassword);
+};
+
+const validateAdminPassword = (inputPassword) => {
+  if (adminPasswordHash) {
+    try {
+      return bcrypt.compareSync(inputPassword, adminPasswordHash);
+    } catch (error) {
+      console.error('[ADMIN][ERROR] Не удалось сравнить админ пароль.', error);
+      return false;
+    }
+  }
+
+  if (!adminPassword) {
+    return false;
+  }
+
+  if (!plainAdminPasswordWarningShown) {
+    console.warn('[ADMIN][WARN] Используется простой ADMIN_PASSW без хеширования. Настоятельно рекомендуется задать ADMIN_PASSW_BCRYPT.');
+    plainAdminPasswordWarningShown = true;
+  }
+
+  return inputPassword === adminPassword;
+};
+
+const issueAdminToken = () => jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: ADMIN_JWT_EXPIRES_IN });
+
+const issueUserToken = (user) => jwt.sign({
+  role: 'user',
+  id: user.id,
+  uid: user.uid,
+  email: user.email
+}, JWT_SECRET, { expiresIn: USER_JWT_EXPIRES_IN });
+
+const setAuthCookie = (res, token, maxAgeMs = 12 * 60 * 60 * 1000) => {
+  res.cookie('token', token, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: 'strict',
+    maxAge: maxAgeMs
+  });
+};
+
+const extractBearerToken = (authorizationHeader) => {
+  if (!authorizationHeader || typeof authorizationHeader !== 'string') {
+    return null;
+  }
+  const trimmed = authorizationHeader.trim();
+  if (!trimmed.toLowerCase().startsWith('bearer ')) {
+    return null;
+  }
+  return trimmed.slice(7).trim() || null;
+};
+
+const resolveAuthToken = (req) => {
+  const cookieToken = req.cookies?.token;
+  if (cookieToken) {
+    return cookieToken;
+  }
+  return extractBearerToken(req.headers.authorization);
+};
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
@@ -180,6 +286,15 @@ const initializeUsers = () => {
     if (normalizeUser(user)) {
       hasChanges = true;
     }
+
+    if (user.password && !isPasswordHashed(user.password)) {
+      try {
+        user.password = hashPassword(user.password);
+        hasChanges = true;
+      } catch (error) {
+        console.error('[SECURITY][ERROR] Не удалось захешировать пароль пользователя', { userId: user.id, error });
+      }
+    }
   });
 
   if (hasChanges) {
@@ -269,8 +384,8 @@ app.use(helmet({
   referrerPolicy: { policy: 'no-referrer' }
 }));
 
-if (process.env.FORCE_HTTPS === 'true') {
-  console.log('[BOOT] Включен режим принудительного HTTPS (FORCE_HTTPS=true).');
+if (FORCE_HTTPS) {
+  console.log('[BOOT] Принудительный HTTPS включен (FORCE_HTTPS=true).');
   app.use((req, res, next) => {
     if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
       return next();
@@ -286,7 +401,7 @@ if (process.env.FORCE_HTTPS === 'true') {
     preload: true
   }));
 } else {
-  console.warn('[BOOT] FORCE_HTTPS выключен. HTTP соединения разрешены.');
+  console.warn('[BOOT][WARN] FORCE_HTTPS=false. Соединения по HTTP разрешены и уязвимы для перехвата.');
 }
 
 app.use(cors({
@@ -297,8 +412,9 @@ app.use(cors({
     console.warn(`[CORS] Заблокирован запрос с origin: ${origin}`);
     return callback(new Error('Not allowed by CORS'));
   },
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
 }));
 
 app.use(bodyParser.json({ limit: '10mb' }));
@@ -314,20 +430,36 @@ const generalLimiter = rateLimit({
   message: { message: 'Слишком много запросов. Повторите позже.' }
 });
 
-const authLimiter = rateLimit({
+const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Слишком много попыток. Повторите позже.' }
+  message: { message: 'Слишком много попыток входа. Попробуйте позже.' }
 });
 
-const codeLimiter = rateLimit({
+const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  message: { message: 'Слишком много регистраций. Попробуйте позже.' }
+});
+
+const codeRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { message: 'Слишком много запросов кода. Попробуйте позже.' }
+});
+
+const passwordChangeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Слишком много попыток смены пароля. Попробуйте позже.' }
 });
 
 app.use(generalLimiter);
@@ -339,19 +471,43 @@ app.get('/admin', (req, res) => {
 
 // JWT Authentication Middleware
 const authenticateJWT = (req, res, next) => {
-  const token = req.cookies.token || req.headers.authorization?.split(' ')[1];
+  const token = resolveAuthToken(req);
 
   if (!token) {
-    return res.status(401).json({ message: 'Authentication required' });
+    return res.status(401).json({ message: 'Требуется аутентификация' });
   }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      return res.status(403).json({ message: 'Invalid or expired token' });
+      return res.status(401).json({ message: 'Недействительный или истёкший токен' });
     }
     req.user = user;
     next();
   });
+};
+
+const requireUserRole = (req, res, next) => {
+  if (!req.user || req.user.role !== 'user') {
+    return res.status(403).json({ message: 'Доступ запрещён' });
+  }
+  next();
+};
+
+const requireSelfOrAdmin = (req, res, next) => {
+  const requestedUserId = parseInt(req.params.userId || req.body.userId, 10);
+  if (!req.user) {
+    return res.status(401).json({ message: 'Требуется аутентификация' });
+  }
+
+  if (req.user.role === 'admin') {
+    return next();
+  }
+
+  if (req.user.role === 'user' && Number.isInteger(requestedUserId) && req.user.id === requestedUserId) {
+    return next();
+  }
+
+  return res.status(403).json({ message: 'Доступ запрещён' });
 };
 
 // Admin Authentication Middleware
@@ -359,12 +515,12 @@ const isAdmin = (req, res, next) => {
   if (req.user && req.user.role === 'admin') {
     next();
   } else {
-    res.status(403).json({ message: 'Admin access required' });
+    res.status(403).json({ message: 'Требуется доступ администратора' });
   }
 };
 
 // Логирование всех запросов
-const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'token', 'avatarBase64']);
+const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'token', 'avatarBase64', 'authorization']);
 
 const sanitizeSensitiveData = (value) => {
   if (Array.isArray(value)) {
@@ -467,22 +623,19 @@ setInterval(syncServerVersion, 60 * 1000);
 
 // --- Admin Routes ---
 app.post('/admin/login', (req, res) => {
-  const { password } = req.body;
-  
-  if (password === adminPassword) {
-    const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-    
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: secureCookie,
-      sameSite: 'strict',
-      maxAge: 8 * 60 * 60 * 1000 // 8 hours
-    });
-    
-    res.json({ success: true, token });
-  } else {
-    res.status(401).json({ success: false, message: 'Invalid password' });
+  const { password } = req.body || {};
+
+  if (!password) {
+    return res.status(400).json({ success: false, message: 'Пароль обязателен' });
   }
+
+  if (!validateAdminPassword(password)) {
+    return res.status(401).json({ success: false, message: 'Неверный пароль' });
+  }
+
+  const token = issueAdminToken();
+  setAuthCookie(res, token, 8 * 60 * 60 * 1000);
+  res.json({ success: true });
 });
 
 app.get('/admin/verify-token', authenticateJWT, isAdmin, (req, res) => {
@@ -490,10 +643,7 @@ app.get('/admin/verify-token', authenticateJWT, isAdmin, (req, res) => {
 });
 
 app.get('/admin/users', authenticateJWT, isAdmin, (req, res) => {
-  const users = db.users.map(user => ({
-    ...user,
-    badges: getBadgesForUid(user.uid)
-  }));
+  const users = db.users.map((user) => buildUserResponse(user));
   res.json(users);
 });
 
@@ -548,7 +698,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.post('/admin/publish-update', (req, res) => {
+app.post('/admin/publish-update', authenticateJWT, isAdmin, (req, res) => {
   const { version, title, message, downloadUrl } = req.body;
 
   if (!version) {
@@ -574,24 +724,25 @@ app.post('/admin/publish-update', (req, res) => {
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const registrationCodes = new Map();
-const REG_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const REG_CODE_TTL_MS = 5 * 60 * 1000; // 5 минут
 
 const generateCode = () => Math.floor(100000 + Math.random() * 900000).toString();
+const normalizeEmail = (email) => email.trim().toLowerCase();
 
 // --- Эндпоинты для аутентификации ---
 
 // Регистрация нового пользователя
-app.post('/auth/register', authLimiter, (req, res) => {
-  const { email, password, name, verificationCode } = req.body;
+app.post('/auth/register', registerLimiter, (req, res) => {
+  const { email, password, name, verificationCode } = req.body || {};
 
   if (!email || !password || !name || !verificationCode) {
     return res.status(400).json({ message: 'Email, пароль, имя и код подтверждения обязательны' });
   }
 
-  const trimmedEmail = email.trim();
+  const normalizedEmail = normalizeEmail(email);
   const trimmedName = name.trim();
 
-  if (!emailRegex.test(trimmedEmail)) {
+  if (!emailRegex.test(normalizeEmail(email))) {
     return res.status(400).json({ message: 'Введите корректный email' });
   }
 
@@ -603,32 +754,39 @@ app.post('/auth/register', authLimiter, (req, res) => {
     return res.status(400).json({ message: 'Имя обязательно для заполнения' });
   }
 
-  const storedCode = registrationCodes.get(trimmedEmail.toLowerCase());
-  if (!storedCode) {
+  const codeRecord = registrationCodes.get(normalizedEmail);
+  if (!codeRecord) {
     return res.status(400).json({ message: 'Код подтверждения не запрошен или истек' });
   }
 
   const now = Date.now();
-  if (storedCode.expiresAt < now) {
-    registrationCodes.delete(trimmedEmail.toLowerCase());
+  if (codeRecord.expiresAt < now) {
+    registrationCodes.delete(normalizedEmail);
     return res.status(400).json({ message: 'Код подтверждения истек. Запросите новый' });
   }
 
-  if (storedCode.code !== verificationCode) {
+  if ((codeRecord.failedAttempts || 0) >= 5) {
+    registrationCodes.delete(normalizedEmail);
+    return res.status(429).json({ message: 'Превышено количество попыток. Запросите новый код.' });
+  }
+
+  if (codeRecord.code !== verificationCode) {
+    codeRecord.failedAttempts = (codeRecord.failedAttempts || 0) + 1;
+    registrationCodes.set(normalizedEmail, codeRecord);
     return res.status(400).json({ message: 'Неверный код подтверждения' });
   }
 
-  const userExists = db.users.find(user => user.email === trimmedEmail);
+  const userExists = db.users.find((user) => normalizeEmail(user.email) === normalizedEmail);
   if (userExists) {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
   const newUser = {
     id: db.userIdCounter,
-    email: trimmedEmail,
-    password, // В реальном приложении пароли нужно хешировать!
+    email: normalizedEmail,
+    password: '',
     name: trimmedName,
-    avatarUrl: '', // Поле для будущей аватарки
+    avatarUrl: '',
     pro: {
       status: false,
       startDate: null,
@@ -638,135 +796,180 @@ app.post('/auth/register', authLimiter, (req, res) => {
     createdAt: new Date().toISOString(),
   };
 
+  assignHashedPassword(newUser, password);
+
   db.userIdCounter += 1;
   db.users.push(newUser);
   saveDb();
-  console.log('New user registered:', newUser);
-  console.log('All users:', db.users);
 
-  registrationCodes.delete(trimmedEmail.toLowerCase());
+  registrationCodes.delete(normalizedEmail);
 
-  // Отправляем пользователя без пароля
-  res.status(201).json(buildUserResponse(newUser));
+  const token = issueUserToken(newUser);
+  setAuthCookie(res, token);
+
+  res.status(201).json({
+    user: buildUserResponse(newUser),
+    token,
+  });
 });
 
-app.post('/auth/request-code', codeLimiter, (req, res) => {
-  const { email } = req.body;
+app.post('/auth/request-code', codeRequestLimiter, (req, res) => {
+  const { email } = req.body || {};
 
   if (!email) {
     return res.status(400).json({ message: 'Email обязателен' });
   }
 
-  const trimmedEmail = email.trim();
-  if (!emailRegex.test(trimmedEmail)) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!emailRegex.test(normalizedEmail)) {
     return res.status(400).json({ message: 'Введите корректный email' });
   }
 
-  const exists = db.users.some(user => user.email === trimmedEmail);
+  const exists = db.users.some((user) => normalizeEmail(user.email) === normalizedEmail);
   if (exists) {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
   const code = generateCode();
-  registrationCodes.set(trimmedEmail.toLowerCase(), {
+  registrationCodes.set(normalizedEmail, {
     code,
     expiresAt: Date.now() + REG_CODE_TTL_MS,
+    failedAttempts: 0,
   });
 
-  console.log(`Registration code for ${trimmedEmail}: ${code}`);
+  if (EXPOSE_DEBUG_CODES) {
+    console.log(`[DEBUG] Registration code for ${normalizedEmail}: ${code}`);
+  }
 
-  res.status(200).json({
+  const responsePayload = {
     message: 'Код подтверждения отправлен на вашу почту',
-    debug_code: code,
-  });
+  };
+
+  if (EXPOSE_DEBUG_CODES) {
+    responsePayload.debug_code = code;
+  }
+
+  res.status(200).json(responsePayload);
 });
 
 // Вход пользователя
-app.post('/auth/login', authLimiter, (req, res) => {
-  const { email, password } = req.body;
+app.post('/auth/login', loginLimiter, (req, res) => {
+  const { email, password } = req.body || {};
 
   if (!email || !password) {
     return res.status(400).json({ message: 'Email и пароль обязательны для заполнения' });
   }
 
-  const user = db.users.find(user => user.email === email && user.password === password);
+  const normalizedEmail = normalizeEmail(email);
+  const user = db.users.find((candidate) => normalizeEmail(candidate.email) === normalizedEmail);
 
-  if (!user) {
+  if (!user || !compareStoredPassword(user.password, password)) {
     return res.status(401).json({ message: 'Неверный email или пароль' });
   }
-  
-  console.log('User logged in:', user);
 
-  // Отправляем пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  if (!isPasswordHashed(user.password)) {
+    try {
+      assignHashedPassword(user, password);
+      saveDb();
+    } catch (error) {
+      console.error('[SECURITY][ERROR] Не удалось обновить пароль пользователя на захешированный вариант', error);
+    }
+  }
+
+  const token = issueUserToken(user);
+  setAuthCookie(res, token);
+
+  res.status(200).json({
+    user: buildUserResponse(user),
+    token,
+  });
+});
+
+app.post('/auth/logout', authenticateJWT, (req, res) => {
+  res.clearCookie('token', {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: 'strict',
+  });
+  res.status(200).json({ message: 'Вы вышли из аккаунта' });
 });
 
 // --- Эндпоинты для работы с профилем ---
 
 // Обновление аватарки пользователя
-app.post('/profile/avatar', (req, res) => {
-  const { userId, avatarBase64 } = req.body;
+app.post('/profile/avatar', authenticateJWT, requireSelfOrAdmin, (req, res) => {
+  const { userId, avatarBase64 } = req.body || {};
 
-  if (!userId || !avatarBase64) {
+  const normalizedId = Number.parseInt(userId, 10);
+  if (!Number.isInteger(normalizedId) || !avatarBase64 || typeof avatarBase64 !== 'string') {
     return res.status(400).json({ message: 'ID пользователя и данные аватарки обязательны' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  if (avatarBase64.length > 10 * 1024 * 1024) { // ~10MB в base64
+    return res.status(413).json({ message: 'Размер аватарки слишком большой' });
+  }
+
+  const user = db.users.find((candidate) => candidate.id === normalizedId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
-  // Обновляем аватарку пользователя
   user.avatarUrl = avatarBase64;
   saveDb();
-  
-  console.log(`Avatar updated for user ${user.email}`);
 
-  // Отправляем обновленные данные пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  res.status(200).json({
+    user: buildUserResponse(user),
+  });
 });
 
 // Получение данных пользователя по ID
-app.get('/profile/:userId', (req, res) => {
-  const userId = parseInt(req.params.userId, 10);
-  
-  const user = db.users.find(user => user.id === userId);
+app.get('/profile/:userId', authenticateJWT, requireSelfOrAdmin, (req, res) => {
+  const userId = Number.parseInt(req.params.userId, 10);
+
+  if (!Number.isInteger(userId)) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
+
+  const user = db.users.find((candidate) => candidate.id === userId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
-  // Отправляем данные пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  res.status(200).json({ user: buildUserResponse(user) });
 });
 
 // Обновление профиля пользователя (имя)
-app.put('/profile/:userId', (req, res) => {
-  const userId = parseInt(req.params.userId, 10);
-  const { name } = req.body;
+app.put('/profile/:userId', authenticateJWT, requireSelfOrAdmin, (req, res) => {
+  const userId = Number.parseInt(req.params.userId, 10);
+  const { name } = req.body || {};
+
+  if (!Number.isInteger(userId)) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
 
   if (!name || name.trim().length === 0) {
     return res.status(400).json({ message: 'Имя обязательно для заполнения' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  const user = db.users.find((candidate) => candidate.id === userId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
-  // Обновляем имя пользователя
   user.name = name.trim();
   saveDb();
-  
-  console.log(`Profile updated for user ${user.email}: name = ${user.name}`);
 
-  // Отправляем обновленные данные пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  res.status(200).json({ user: buildUserResponse(user) });
 });
 
 // Смена пароля пользователя
-app.put('/profile/:userId/password', (req, res) => {
-  const userId = parseInt(req.params.userId, 10);
-  const { currentPassword, newPassword } = req.body;
+app.put('/profile/:userId/password', authenticateJWT, requireSelfOrAdmin, passwordChangeLimiter, (req, res) => {
+  const userId = Number.parseInt(req.params.userId, 10);
+  const { currentPassword, newPassword } = req.body || {};
+
+  if (!Number.isInteger(userId)) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
 
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ message: 'Необходимо заполнить текущий и новый пароль' });
@@ -776,21 +979,22 @@ app.put('/profile/:userId/password', (req, res) => {
     return res.status(400).json({ message: 'Новый пароль должен содержать минимум 6 символов' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  const user = db.users.find((candidate) => candidate.id === userId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
-  // Проверяем текущий пароль
-  if (user.password !== currentPassword) {
+  if (!compareStoredPassword(user.password, currentPassword)) {
     return res.status(401).json({ message: 'Неверный текущий пароль' });
   }
 
-  // Обновляем пароль
-  user.password = newPassword;
-  saveDb();
-  
-  console.log(`Password updated for user ${user.email}`);
+  try {
+    assignHashedPassword(user, newPassword);
+    saveDb();
+  } catch (error) {
+    console.error('[SECURITY][ERROR] Не удалось обновить пароль пользователя', { userId, error });
+    return res.status(500).json({ message: 'Не удалось обновить пароль. Попробуйте позже.' });
+  }
 
   res.status(200).json({ message: 'Пароль успешно изменен' });
 });
