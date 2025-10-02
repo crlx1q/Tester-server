@@ -3,6 +3,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const jwt = require('jsonwebtoken');
@@ -93,74 +94,102 @@ const verifyPassword = async (plainPassword, storedPassword) => {
   return storedPassword === plainPassword;
 };
 
-const BADGE_CATALOG = {
-  beta: { key: 'beta', label: 'Бета-тестер', icon: 'flame' },
-  designer: { key: 'designer', label: 'Дизайнер', icon: 'pen-tool' },
-  programmer: { key: 'programmer', label: 'Разработчик', icon: 'code' },
-  mentor: { key: 'mentor', label: 'Ментор', icon: 'graduation-cap' },
-  ambassador: { key: 'ambassador', label: 'Амбассадор', icon: 'users' },
-};
-
-const DEFAULT_BADGE_KEYS = Object.keys(BADGE_CATALOG);
-const SETTINGS_KEYS = {
-  REGISTRATION_FROZEN: 'registration_frozen',
-};
-
-const DEFAULT_SETTINGS = {
-  [SETTINGS_KEYS.REGISTRATION_FROZEN]: false,
-};
-
-const PRO_PLAN_OPTIONS = [
-  { code: '1m', months: 1 },
-  { code: '3m', months: 3 },
-  { code: '6m', months: 6 },
-  { code: '12m', months: 12 },
-  { code: 'lifetime', months: null },
+const DEFAULT_BADGES = [
+  { key: 'beta', icon: 'rocket' },
+  { key: 'designer', icon: 'pen-tool' },
+  { key: 'programmer', icon: 'terminal' },
 ];
 
-const PRO_PLAN_MAP = PRO_PLAN_OPTIONS.reduce((acc, plan) => {
-  acc[plan.code] = plan;
-  return acc;
-}, {});
+const PRO_PLANS = [
+  { code: '1m', months: 1, label: '1 месяц' },
+  { code: '3m', months: 3, label: '3 месяца' },
+  { code: '6m', months: 6, label: '6 месяцев' },
+  { code: '1y', months: 12, label: '12 месяцев' },
+  { code: 'forever', months: null, label: 'Навсегда' },
+];
 
-const addMonths = (date, months) => {
-  const result = new Date(date);
-  result.setMonth(result.getMonth() + months);
-  return result;
+const PRO_PLAN_DEFAULT = 'free';
+const REGISTRATION_SETTINGS_KEY = 'registration';
+const SETTINGS_CACHE_TTL_MS = 30 * 1000;
+
+const normalizeBadgeKey = (key = '') => key.trim().toLowerCase();
+const getBadgeIcon = (key = '') => {
+  const normalizedKey = normalizeBadgeKey(key);
+  return (DEFAULT_BADGES.find((badge) => normalizeBadgeKey(badge.key) === normalizedKey)?.icon) || 'award';
 };
 
-const getPlanOrDefault = (planCode) => {
-  if (planCode && PRO_PLAN_MAP[planCode]) {
-    return PRO_PLAN_MAP[planCode];
-  }
-  return PRO_PLAN_MAP['1m'];
+const getPlanByCode = (code) => PRO_PLANS.find((plan) => plan.code === code);
+
+const registrationSettingsCache = {
+  value: null,
+  expiresAt: 0,
 };
 
-const applyProPlanToUser = (user, planCode) => {
-  const plan = getPlanOrDefault(planCode);
-  const now = new Date();
-
-  if (!user.pro) {
-    user.pro = {};
-  }
-
-  user.pro.status = true;
-  user.pro.planCode = plan.code;
-  user.pro.startDate = now;
-  user.pro.updatedAt = now;
-  user.pro.endDate = plan.months ? addMonths(now, plan.months) : null;
+const DEFAULT_REGISTRATION_SETTINGS = {
+  frozen: false,
+  message: 'Регистрация временно недоступна. Попробуйте позже.'
 };
 
-const clearProStatus = (user) => {
-  if (!user.pro) {
-    user.pro = {};
+const getRegistrationSettings = async (forceRefresh = false) => {
+  const now = Date.now();
+  if (!forceRefresh && registrationSettingsCache.value && registrationSettingsCache.expiresAt > now) {
+    return registrationSettingsCache.value;
   }
 
-  user.pro.status = false;
-  user.pro.planCode = 'free';
-  user.pro.startDate = null;
-  user.pro.endDate = null;
-  user.pro.updatedAt = new Date();
+  const doc = await Setting.findOne({ key: REGISTRATION_SETTINGS_KEY }).lean();
+  const value = {
+    ...DEFAULT_REGISTRATION_SETTINGS,
+    ...(doc?.value || {}),
+  };
+
+  registrationSettingsCache.value = value;
+  registrationSettingsCache.expiresAt = now + SETTINGS_CACHE_TTL_MS;
+
+  return value;
+};
+
+const setRegistrationSettings = async (value = {}) => {
+  const sanitized = {
+    ...DEFAULT_REGISTRATION_SETTINGS,
+    ...value,
+  };
+
+  sanitized.frozen = Boolean(sanitized.frozen);
+  sanitized.message = String(sanitized.message || '').trim() || DEFAULT_REGISTRATION_SETTINGS.message;
+
+  await Setting.updateOne(
+    { key: REGISTRATION_SETTINGS_KEY },
+    { $set: { value: sanitized } },
+    { upsert: true }
+  );
+
+  registrationSettingsCache.value = sanitized;
+  registrationSettingsCache.expiresAt = Date.now() + SETTINGS_CACHE_TTL_MS;
+
+  return sanitized;
+};
+
+const invalidateRegistrationSettingsCache = () => {
+  registrationSettingsCache.value = null;
+  registrationSettingsCache.expiresAt = 0;
+};
+
+const isRegistrationFrozen = async () => {
+  const settings = await getRegistrationSettings();
+  return Boolean(settings?.frozen);
+};
+
+const getBadgesDetailedForUid = async (uid) => {
+  if (!uid) {
+    return [];
+  }
+
+  const normalizedUid = uid.toString();
+  const badgeDocs = await Badge.find({ holders: normalizedUid }, { key: 1, icon: 1, _id: 0 }).lean();
+  return badgeDocs.map((badge) => ({
+    key: badge.key,
+    icon: badge.icon || getBadgeIcon(badge.key),
+  }));
 };
 
 const counterSchema = new mongoose.Schema({
@@ -180,7 +209,7 @@ const userSchema = new mongoose.Schema({
     startDate: { type: Date, default: null },
     endDate: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
-    planCode: { type: String, default: 'free' },
+    plan: { type: String, default: PRO_PLAN_DEFAULT },
   },
   createdAt: { type: Date, default: Date.now },
 }, { versionKey: false });
@@ -188,17 +217,18 @@ const userSchema = new mongoose.Schema({
 const badgeSchema = new mongoose.Schema({
   key: { type: String, unique: true, required: true },
   holders: { type: [String], default: [] },
+  icon: { type: String, default: 'award' },
 }, { versionKey: false });
 
-const settingSchema = new mongoose.Schema({
+const settingsSchema = new mongoose.Schema({
   key: { type: String, unique: true, required: true },
-  value: { type: mongoose.Schema.Types.Mixed, required: true },
+  value: { type: mongoose.Schema.Types.Mixed, default: {} },
 }, { versionKey: false });
 
 const Counter = mongoose.model('Counter', counterSchema);
 const User = mongoose.model('User', userSchema);
 const Badge = mongoose.model('Badge', badgeSchema);
-const Setting = mongoose.model('Setting', settingSchema);
+const Setting = mongoose.model('Setting', settingsSchema);
 
 mongoose.connection.on('error', (error) => {
   console.error('[MONGO][ERROR]', error);
@@ -209,87 +239,21 @@ mongoose.connection.on('disconnected', () => {
 });
 
 const ensureDefaultBadges = async () => {
-  for (const key of DEFAULT_BADGE_KEYS) {
+  for (const { key, icon } of DEFAULT_BADGES) {
+    const normalizedKey = normalizeBadgeKey(key);
     try {
       await Badge.updateOne(
-        { key },
-        { $setOnInsert: { holders: [] } },
+        { key: normalizedKey },
+        {
+          $setOnInsert: { holders: [] },
+          $set: { icon: icon || getBadgeIcon(normalizedKey) }
+        },
         { upsert: true }
       );
     } catch (error) {
-      console.error(`[MONGO][ERROR] Не удалось обеспечить наличие бейджа ${key}.`, error);
+      console.error(`[MONGO][ERROR] Не удалось обеспечить наличие бейджа ${normalizedKey}.`, error);
     }
   }
-};
-
-const settingsCache = new Map();
-
-const ensureDefaultSettings = async () => {
-  const entries = Object.entries(DEFAULT_SETTINGS);
-  await Promise.all(entries.map(async ([key, value]) => {
-    try {
-      const doc = await Setting.findOneAndUpdate(
-        { key },
-        { $setOnInsert: { value } },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
-      settingsCache.set(key, doc.value);
-    } catch (error) {
-      console.error(`[MONGO][ERROR] Не удалось обеспечить настройку ${key}.`, error);
-    }
-  }));
-};
-
-const getSettingValue = async (key) => {
-  if (settingsCache.has(key)) {
-    return settingsCache.get(key);
-  }
-
-  try {
-    const doc = await Setting.findOne({ key }).lean();
-    if (doc) {
-      settingsCache.set(key, doc.value);
-      return doc.value;
-    }
-  } catch (error) {
-    console.error(`[MONGO][ERROR] Не удалось получить настройку ${key}.`, error);
-  }
-
-  return DEFAULT_SETTINGS[key];
-};
-
-const setSettingValue = async (key, value) => {
-  try {
-    await Setting.findOneAndUpdate(
-      { key },
-      { value },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-    settingsCache.set(key, value);
-  } catch (error) {
-    console.error(`[MONGO][ERROR] Не удалось сохранить настройку ${key}.`, error);
-    throw error;
-  }
-};
-
-const getAllSettings = async () => {
-  try {
-    const docs = await Setting.find({}).lean();
-    const combined = { ...DEFAULT_SETTINGS };
-    docs.forEach((doc) => {
-      combined[doc.key] = doc.value;
-      settingsCache.set(doc.key, doc.value);
-    });
-    return combined;
-  } catch (error) {
-    console.error('[MONGO][ERROR] Не удалось получить все настройки.', error);
-    return { ...DEFAULT_SETTINGS };
-  }
-};
-
-const isRegistrationFrozen = async () => {
-  const value = await getSettingValue(SETTINGS_KEYS.REGISTRATION_FROZEN);
-  return Boolean(value);
 };
 
 const initializeMongo = async () => {
@@ -303,7 +267,6 @@ const initializeMongo = async () => {
     });
     console.log('[BOOT] Установлено соединение с MongoDB Atlas.');
     await ensureDefaultBadges();
-    await ensureDefaultSettings();
   } catch (error) {
     console.error('[BOOT][ERROR] Не удалось подключиться к MongoDB.', error);
   }
@@ -335,16 +298,6 @@ const generateUid = async () => {
   }
 };
 
-const getBadgesForUid = async (uid) => {
-  if (!uid) {
-    return [];
-  }
-
-  const normalizedUid = uid.toString();
-  const badgeDocs = await Badge.find({ holders: normalizedUid }, { key: 1, _id: 0 }).lean();
-  return badgeDocs.map((badge) => badge.key);
-};
-
 const buildUserResponse = async (userDoc) => {
   if (!userDoc) {
     return null;
@@ -358,20 +311,21 @@ const buildUserResponse = async (userDoc) => {
   }
 
   if (rest.pro) {
-    if (rest.pro.startDate instanceof Date) {
-      rest.pro.startDate = rest.pro.startDate.toISOString();
-    }
-    if (rest.pro.endDate instanceof Date) {
-      rest.pro.endDate = rest.pro.endDate.toISOString();
-    }
-    if (rest.pro.updatedAt instanceof Date) {
-      rest.pro.updatedAt = rest.pro.updatedAt.toISOString();
-    }
+    const normalizedPro = normalizeProState(rest.pro);
+    rest.pro = {
+      ...normalizedPro,
+      startDate: normalizedPro.startDate ? normalizedPro.startDate.toISOString() : null,
+      endDate: normalizedPro.endDate ? normalizedPro.endDate.toISOString() : null,
+      updatedAt: normalizedPro.updatedAt ? normalizedPro.updatedAt.toISOString() : null,
+    };
   }
+
+  const badgeDetails = await getBadgesDetailedForUid(user.uid);
 
   return {
     ...rest,
-    badges: await getBadgesForUid(user.uid),
+    badges: badgeDetails.map((badge) => badge.key),
+    badgeDetails,
   };
 };
 
@@ -407,15 +361,20 @@ const grantBadgesToUser = async (uid, badgeKeys = []) => {
   }
 
   await Promise.all(badgeKeys.map(async (badgeKey) => {
-    const normalizedKey = badgeKey.trim().toLowerCase();
+    const normalizedKey = normalizeBadgeKey(badgeKey);
     if (!normalizedKey) {
       return;
     }
 
+    const icon = getBadgeIcon(normalizedKey);
     try {
       await Badge.updateOne(
         { key: normalizedKey },
-        { $addToSet: { holders: uid.toString() } },
+        {
+          $set: { icon },
+          $setOnInsert: { holders: [] },
+          $addToSet: { holders: uid.toString() }
+        },
         { upsert: true }
       );
     } catch (error) {
@@ -431,7 +390,7 @@ const revokeBadgesFromUser = async (uid, badgeKeys = []) => {
   }
 
   await Badge.updateMany(
-    { key: { $in: badgeKeys.map((key) => key.trim().toLowerCase()).filter(Boolean) } },
+    { key: { $in: badgeKeys.map((key) => normalizeBadgeKey(key)).filter(Boolean) } },
     { $pull: { holders: uid.toString() } }
   );
 };
@@ -655,6 +614,31 @@ const syncServerVersion = () => {
   broadcastUpdate();
 };
 
+const SEMVER_REGEX = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/;
+
+const updatePackageVersion = async (version) => {
+  const sanitizedVersion = String(version || '').trim();
+  if (!SEMVER_REGEX.test(sanitizedVersion)) {
+    throw new Error('INVALID_VERSION');
+  }
+
+  const raw = await fsp.readFile(packageJsonPath, 'utf-8');
+  const pkg = JSON.parse(raw);
+  pkg.version = sanitizedVersion;
+  await fsp.writeFile(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf-8');
+
+  serverVersion = sanitizedVersion;
+  latestVersionInfo = {
+    ...latestVersionInfo,
+    version: sanitizedVersion,
+    title: latestVersionInfo.title || buildDefaultTitle(sanitizedVersion),
+    message: latestVersionInfo.message || buildDefaultMessage(sanitizedVersion),
+    publishedAt: new Date().toISOString(),
+  };
+
+  broadcastUpdate('version_updated');
+};
+
 if (fs.existsSync(packageJsonPath)) {
   fs.watch(packageJsonPath, { persistent: false }, () => {
     setTimeout(syncServerVersion, 200);
@@ -698,9 +682,87 @@ app.get('/admin/users', authenticateJWT, isAdmin, async (req, res) => {
   }
 });
 
+const computeProDates = (planCode) => {
+  const plan = getPlanByCode(planCode);
+  if (!plan) {
+    return null;
+  }
+
+  const startDate = new Date();
+  if (plan.months === null) {
+    return {
+      plan: plan.code,
+      startDate,
+      endDate: null,
+    };
+  }
+
+  const endDate = new Date(startDate);
+  endDate.setMonth(endDate.getMonth() + plan.months);
+  return {
+    plan: plan.code,
+    startDate,
+    endDate,
+  };
+};
+
+const normalizeProState = (proState = {}) => {
+  if (!proState.status) {
+    return {
+      status: false,
+      startDate: null,
+      endDate: null,
+      plan: PRO_PLAN_DEFAULT,
+      updatedAt: new Date(),
+    };
+  }
+
+  if (proState.endDate && new Date(proState.endDate).getTime() < Date.now()) {
+    return {
+      status: false,
+      startDate: null,
+      endDate: null,
+      plan: PRO_PLAN_DEFAULT,
+      updatedAt: new Date(),
+    };
+  }
+
+  return {
+    status: true,
+    startDate: proState.startDate ? new Date(proState.startDate) : new Date(),
+    endDate: proState.endDate ? new Date(proState.endDate) : null,
+    plan: proState.plan || (proState.endDate ? 'custom' : 'forever'),
+    updatedAt: new Date(),
+  };
+};
+
+const applyProPlan = (user, status, planCode) => {
+  user.pro = user.pro || {};
+
+  if (!status) {
+    user.pro.status = false;
+    user.pro.startDate = null;
+    user.pro.endDate = null;
+    user.pro.plan = PRO_PLAN_DEFAULT;
+    user.pro.updatedAt = new Date();
+    return;
+  }
+
+  const computed = computeProDates(planCode);
+  if (!computed) {
+    throw new Error(`Unknown PRO plan: ${planCode}`);
+  }
+
+  user.pro.status = true;
+  user.pro.startDate = computed.startDate;
+  user.pro.endDate = computed.endDate;
+  user.pro.plan = computed.plan;
+  user.pro.updatedAt = new Date();
+};
+
 app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
-  const { status } = req.body;
+  const { status, plan } = req.body;
   if (!Number.isFinite(userId)) {
     return res.status(400).json({ success: false, message: 'Некорректный идентификатор пользователя' });
   }
@@ -711,12 +773,11 @@ app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, async (req, res) =
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    user.pro = user.pro || {};
-    user.pro.status = Boolean(status);
-    user.pro.updatedAt = new Date();
-
-    if (user.pro.status && !user.pro.startDate) {
-      user.pro.startDate = new Date();
+    if (status) {
+      const requestedPlan = plan || 'forever';
+      applyProPlan(user, true, requestedPlan);
+    } else {
+      applyProPlan(user, false, PRO_PLAN_DEFAULT);
     }
 
     await user.save();
@@ -724,6 +785,9 @@ app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, async (req, res) =
     res.json({ success: true, user: await buildUserResponse(user) });
   } catch (error) {
     console.error('[ADMIN][ERROR] Не удалось обновить статус PRO пользователя.', error);
+    if (error.message && error.message.includes('Unknown PRO plan')) {
+      return res.status(400).json({ success: false, message: 'Указан неизвестный тариф PRO' });
+    }
     res.status(500).json({ success: false, message: 'Не удалось обновить статус PRO' });
   }
 });
@@ -750,15 +814,60 @@ app.post('/admin/reload-badges', authenticateJWT, isAdmin, async (req, res) => {
 
 app.get('/admin/badges', authenticateJWT, isAdmin, async (req, res) => {
   try {
-    const badgeDocs = await Badge.find({}, { key: 1, _id: 0 }).lean();
-    const badges = badgeDocs
-      .map((badge) => badge.key)
-      .filter((key) => typeof key === 'string' && key.trim().length > 0);
+    await ensureDefaultBadges();
 
-    res.json([...new Set(badges)]);
+    const badgeDocs = await Badge.find({}, { key: 1, icon: 1, _id: 0 }).lean();
+    const badgeMap = new Map();
+
+    DEFAULT_BADGES.forEach(({ key, icon }) => {
+      const normalizedKey = normalizeBadgeKey(key);
+      badgeMap.set(normalizedKey, {
+        key: normalizedKey,
+        icon: icon || getBadgeIcon(normalizedKey),
+      });
+    });
+
+    badgeDocs.forEach((badge) => {
+      if (!badge?.key) {
+        return;
+      }
+      const normalizedKey = normalizeBadgeKey(badge.key);
+      badgeMap.set(normalizedKey, {
+        key: normalizedKey,
+        icon: badge.icon || getBadgeIcon(normalizedKey),
+      });
+    });
+
+    res.json(Array.from(badgeMap.values()));
   } catch (error) {
     console.error('[ADMIN][ERROR] Не удалось получить список бейджей.', error);
     res.status(500).json({ success: false, message: 'Не удалось получить список бейджей' });
+  }
+});
+
+app.get('/admin/pro-plans', authenticateJWT, isAdmin, (req, res) => {
+  res.json(PRO_PLANS);
+});
+
+app.get('/admin/settings/registration', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const settings = await getRegistrationSettings(true);
+    res.json(settings);
+  } catch (error) {
+    console.error('[ADMIN][ERROR] Не удалось получить настройки регистрации.', error);
+    res.status(500).json({ success: false, message: 'Не удалось получить настройки регистрации' });
+  }
+});
+
+app.post('/admin/settings/registration', authenticateJWT, isAdmin, async (req, res) => {
+  const { frozen, message } = req.body || {};
+
+  try {
+    const updated = await setRegistrationSettings({ frozen, message });
+    res.json({ success: true, settings: updated });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] Не удалось обновить настройки регистрации.', error);
+    res.status(500).json({ success: false, message: 'Не удалось обновить настройки регистрации' });
   }
 });
 
@@ -881,10 +990,6 @@ app.post('/auth/register', authLimiter, async (req, res) => {
     return res.status(400).json({ message: 'Введите корректный email' });
   }
 
-  if (await isRegistrationFrozen()) {
-    return res.status(503).json({ message: 'Регистрация временно недоступна. Попробуйте позже.' });
-  }
-
   if (password.length < 6) {
     return res.status(400).json({ message: 'Пароль должен содержать минимум 6 символов' });
   }
@@ -894,6 +999,14 @@ app.post('/auth/register', authLimiter, async (req, res) => {
   }
 
   const normalizedEmail = normalizeEmail(trimmedEmail);
+
+  const registrationSettings = await getRegistrationSettings();
+  if (registrationSettings.frozen) {
+    return res.status(423).json({
+      message: registrationSettings.message,
+      code: 'REGISTRATION_FROZEN',
+    });
+  }
 
   const storedCode = registrationCodes.get(normalizedEmail);
   if (!storedCode) {
@@ -937,6 +1050,7 @@ app.post('/auth/register', authLimiter, async (req, res) => {
         startDate: null,
         endDate: null,
         updatedAt: null,
+        plan: PRO_PLAN_DEFAULT,
       },
       uid,
     });
@@ -958,16 +1072,19 @@ app.post('/auth/request-code', registrationCodeLimiter, async (req, res) => {
   }
 
   const trimmedEmail = email.trim();
-  if (!emailRegex.test(trimmedEmail)) {
-    return res.status(400).json({ message: 'Введите корректный email' });
-  }
-
-  const normalizedEmail = normalizeEmail(trimmedEmail);
   const exists = await userExistsByEmail(normalizedEmail);
   if (exists) {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
+  const userResponse = await buildUserResponse(user);
+  userResponse.pro = {
+    status: user.pro.status,
+    startDate: user.pro.startDate ? user.pro.startDate.toISOString() : null,
+    endDate: user.pro.endDate ? user.pro.endDate.toISOString() : null,
+    updatedAt: user.pro.updatedAt ? user.pro.updatedAt.toISOString() : null,
+    plan: user.pro.plan,
+  };
   const code = generateCode();
   registrationCodes.set(normalizedEmail, {
     code,
