@@ -1047,19 +1047,26 @@ app.post('/auth/request-code', registrationCodeLimiter, async (req, res) => {
   }
 
   const trimmedEmail = email.trim();
+
+  if (!emailRegex.test(trimmedEmail)) {
+    return res.status(400).json({ message: 'Введите корректный email' });
+  }
+
+  const normalizedEmail = normalizeEmail(trimmedEmail);
+
+  const registrationSettings = await getRegistrationSettings();
+  if (registrationSettings.frozen) {
+    return res.status(423).json({
+      message: registrationSettings.message,
+      code: 'REGISTRATION_FROZEN',
+    });
+  }
+
   const exists = await userExistsByEmail(normalizedEmail);
   if (exists) {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
-  const userResponse = await buildUserResponse(user);
-  userResponse.pro = {
-    status: user.pro.status,
-    startDate: user.pro.startDate ? user.pro.startDate.toISOString() : null,
-    endDate: user.pro.endDate ? user.pro.endDate.toISOString() : null,
-    updatedAt: user.pro.updatedAt ? user.pro.updatedAt.toISOString() : null,
-    plan: user.pro.plan,
-  };
   const code = generateCode();
   registrationCodes.set(normalizedEmail, {
     code,
