@@ -93,7 +93,75 @@ const verifyPassword = async (plainPassword, storedPassword) => {
   return storedPassword === plainPassword;
 };
 
-const DEFAULT_BADGE_KEYS = ['beta', 'designer', 'programmer'];
+const BADGE_CATALOG = {
+  beta: { key: 'beta', label: 'Бета-тестер', icon: 'flame' },
+  designer: { key: 'designer', label: 'Дизайнер', icon: 'pen-tool' },
+  programmer: { key: 'programmer', label: 'Разработчик', icon: 'code' },
+  mentor: { key: 'mentor', label: 'Ментор', icon: 'graduation-cap' },
+  ambassador: { key: 'ambassador', label: 'Амбассадор', icon: 'users' },
+};
+
+const DEFAULT_BADGE_KEYS = Object.keys(BADGE_CATALOG);
+const SETTINGS_KEYS = {
+  REGISTRATION_FROZEN: 'registration_frozen',
+};
+
+const DEFAULT_SETTINGS = {
+  [SETTINGS_KEYS.REGISTRATION_FROZEN]: false,
+};
+
+const PRO_PLAN_OPTIONS = [
+  { code: '1m', months: 1 },
+  { code: '3m', months: 3 },
+  { code: '6m', months: 6 },
+  { code: '12m', months: 12 },
+  { code: 'lifetime', months: null },
+];
+
+const PRO_PLAN_MAP = PRO_PLAN_OPTIONS.reduce((acc, plan) => {
+  acc[plan.code] = plan;
+  return acc;
+}, {});
+
+const addMonths = (date, months) => {
+  const result = new Date(date);
+  result.setMonth(result.getMonth() + months);
+  return result;
+};
+
+const getPlanOrDefault = (planCode) => {
+  if (planCode && PRO_PLAN_MAP[planCode]) {
+    return PRO_PLAN_MAP[planCode];
+  }
+  return PRO_PLAN_MAP['1m'];
+};
+
+const applyProPlanToUser = (user, planCode) => {
+  const plan = getPlanOrDefault(planCode);
+  const now = new Date();
+
+  if (!user.pro) {
+    user.pro = {};
+  }
+
+  user.pro.status = true;
+  user.pro.planCode = plan.code;
+  user.pro.startDate = now;
+  user.pro.updatedAt = now;
+  user.pro.endDate = plan.months ? addMonths(now, plan.months) : null;
+};
+
+const clearProStatus = (user) => {
+  if (!user.pro) {
+    user.pro = {};
+  }
+
+  user.pro.status = false;
+  user.pro.planCode = 'free';
+  user.pro.startDate = null;
+  user.pro.endDate = null;
+  user.pro.updatedAt = new Date();
+};
 
 const counterSchema = new mongoose.Schema({
   key: { type: String, unique: true, required: true },
@@ -112,6 +180,7 @@ const userSchema = new mongoose.Schema({
     startDate: { type: Date, default: null },
     endDate: { type: Date, default: null },
     updatedAt: { type: Date, default: null },
+    planCode: { type: String, default: 'free' },
   },
   createdAt: { type: Date, default: Date.now },
 }, { versionKey: false });
@@ -121,9 +190,15 @@ const badgeSchema = new mongoose.Schema({
   holders: { type: [String], default: [] },
 }, { versionKey: false });
 
+const settingSchema = new mongoose.Schema({
+  key: { type: String, unique: true, required: true },
+  value: { type: mongoose.Schema.Types.Mixed, required: true },
+}, { versionKey: false });
+
 const Counter = mongoose.model('Counter', counterSchema);
 const User = mongoose.model('User', userSchema);
 const Badge = mongoose.model('Badge', badgeSchema);
+const Setting = mongoose.model('Setting', settingSchema);
 
 mongoose.connection.on('error', (error) => {
   console.error('[MONGO][ERROR]', error);
@@ -147,6 +222,76 @@ const ensureDefaultBadges = async () => {
   }
 };
 
+const settingsCache = new Map();
+
+const ensureDefaultSettings = async () => {
+  const entries = Object.entries(DEFAULT_SETTINGS);
+  await Promise.all(entries.map(async ([key, value]) => {
+    try {
+      const doc = await Setting.findOneAndUpdate(
+        { key },
+        { $setOnInsert: { value } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+      settingsCache.set(key, doc.value);
+    } catch (error) {
+      console.error(`[MONGO][ERROR] Не удалось обеспечить настройку ${key}.`, error);
+    }
+  }));
+};
+
+const getSettingValue = async (key) => {
+  if (settingsCache.has(key)) {
+    return settingsCache.get(key);
+  }
+
+  try {
+    const doc = await Setting.findOne({ key }).lean();
+    if (doc) {
+      settingsCache.set(key, doc.value);
+      return doc.value;
+    }
+  } catch (error) {
+    console.error(`[MONGO][ERROR] Не удалось получить настройку ${key}.`, error);
+  }
+
+  return DEFAULT_SETTINGS[key];
+};
+
+const setSettingValue = async (key, value) => {
+  try {
+    await Setting.findOneAndUpdate(
+      { key },
+      { value },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    settingsCache.set(key, value);
+  } catch (error) {
+    console.error(`[MONGO][ERROR] Не удалось сохранить настройку ${key}.`, error);
+    throw error;
+  }
+};
+
+const getAllSettings = async () => {
+  try {
+    const docs = await Setting.find({}).lean();
+    const combined = { ...DEFAULT_SETTINGS };
+    docs.forEach((doc) => {
+      combined[doc.key] = doc.value;
+      settingsCache.set(doc.key, doc.value);
+    });
+    return combined;
+  } catch (error) {
+    console.error('[MONGO][ERROR] Не удалось получить все настройки.', error);
+    return { ...DEFAULT_SETTINGS };
+  }
+};
+
+const isRegistrationFrozen = async () => {
+  const value = await getSettingValue(SETTINGS_KEYS.REGISTRATION_FROZEN);
+  return Boolean(value);
+};
+
 const initializeMongo = async () => {
   if (!mongoUri) {
     return;
@@ -158,6 +303,7 @@ const initializeMongo = async () => {
     });
     console.log('[BOOT] Установлено соединение с MongoDB Atlas.');
     await ensureDefaultBadges();
+    await ensureDefaultSettings();
   } catch (error) {
     console.error('[BOOT][ERROR] Не удалось подключиться к MongoDB.', error);
   }
@@ -735,6 +881,10 @@ app.post('/auth/register', authLimiter, async (req, res) => {
     return res.status(400).json({ message: 'Введите корректный email' });
   }
 
+  if (await isRegistrationFrozen()) {
+    return res.status(503).json({ message: 'Регистрация временно недоступна. Попробуйте позже.' });
+  }
+
   if (password.length < 6) {
     return res.status(400).json({ message: 'Пароль должен содержать минимум 6 символов' });
   }
@@ -752,7 +902,7 @@ app.post('/auth/register', authLimiter, async (req, res) => {
 
   const now = Date.now();
   if (storedCode.expiresAt < now) {
-    registrationCodes.delete(trimmedEmail.toLowerCase());
+    registrationCodes.delete(normalizedEmail);
     return res.status(400).json({ message: 'Код подтверждения истек. Запросите новый' });
   }
 
