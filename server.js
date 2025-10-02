@@ -407,7 +407,7 @@ const isAdmin = (req, res, next) => {
 };
 
 // Логирование всех запросов
-const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'token', 'avatarBase64']);
+const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'resetCode', 'token', 'avatarBase64']);
 
 const sanitizeSensitiveData = (value) => {
   if (Array.isArray(value)) {
@@ -618,6 +618,8 @@ app.post('/admin/publish-update', (req, res) => {
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const registrationCodes = new Map();
 const REG_CODE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const passwordResetCodes = new Map();
+const PASSWORD_RESET_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 const generateCode = () => Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -730,6 +732,91 @@ app.post('/auth/request-code', codeLimiter, (req, res) => {
     message: 'Код подтверждения отправлен на вашу почту',
     debug_code: code,
   });
+});
+
+app.post('/auth/reset-password/request', codeLimiter, (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ message: 'Email обязателен' });
+  }
+
+  const trimmedEmail = email.trim();
+
+  if (!emailRegex.test(trimmedEmail)) {
+    return res.status(400).json({ message: 'Введите корректный email' });
+  }
+
+  const user = db.users.find((u) => u.email === trimmedEmail);
+  if (!user) {
+    return res.status(404).json({ message: 'Пользователь с таким email не найден' });
+  }
+
+  const code = generateCode();
+  passwordResetCodes.set(trimmedEmail.toLowerCase(), {
+    code,
+    userId: user.id,
+    expiresAt: Date.now() + PASSWORD_RESET_TTL_MS,
+  });
+
+  console.log(`Password reset code for ${trimmedEmail}: ${code}`);
+
+  res.status(200).json({
+    message: 'Код для сброса пароля отправлен на вашу почту',
+    debug_code: code,
+  });
+});
+
+app.post('/auth/reset-password/confirm', authLimiter, async (req, res) => {
+  const { email, code, newPassword } = req.body;
+
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ message: 'Email, код и новый пароль обязательны' });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({ message: 'Новый пароль должен содержать минимум 6 символов' });
+  }
+
+  const trimmedEmail = email.trim();
+
+  if (!emailRegex.test(trimmedEmail)) {
+    return res.status(400).json({ message: 'Введите корректный email' });
+  }
+
+  const stored = passwordResetCodes.get(trimmedEmail.toLowerCase());
+  if (!stored) {
+    return res.status(400).json({ message: 'Код сброса не запрошен или истек' });
+  }
+
+  if (stored.expiresAt < Date.now()) {
+    passwordResetCodes.delete(trimmedEmail.toLowerCase());
+    return res.status(400).json({ message: 'Код сброса истек. Запросите новый' });
+  }
+
+  if (stored.code !== code) {
+    return res.status(400).json({ message: 'Неверный код сброса' });
+  }
+
+  const user = db.users.find((u) => u.id === stored.userId && u.email === trimmedEmail);
+  if (!user) {
+    passwordResetCodes.delete(trimmedEmail.toLowerCase());
+    return res.status(404).json({ message: 'Пользователь не найден' });
+  }
+
+  try {
+    user.password = await bcrypt.hash(newPassword, BCRYPT_SALT_ROUNDS);
+  } catch (error) {
+    console.error('[SECURITY][ERROR] Не удалось хешировать пароль при сбросе.', error);
+    return res.status(500).json({ message: 'Не удалось сбросить пароль. Попробуйте позже.' });
+  }
+
+  passwordResetCodes.delete(trimmedEmail.toLowerCase());
+  saveDb();
+
+  console.log(`Password reset for user ${user.email}`);
+
+  res.status(200).json({ message: 'Пароль успешно сброшен' });
 });
 
 // Вход пользователя
