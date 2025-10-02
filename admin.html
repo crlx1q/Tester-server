@@ -149,6 +149,7 @@
         const usersCount = document.getElementById('usersCount');
         const searchInput = document.getElementById('searchUser');
         const serverStatus = document.getElementById('serverStatus');
+        let availableBadges = [];
 
         const togglePasswordVisibility = () => {
             const isPassword = passwordInput.type === 'password';
@@ -216,6 +217,7 @@
                     showAdminPanel();
                     loadUsers();
                     loadServerStatus();
+                    loadAvailableBadges();
                     connectWebSocket();
                     passwordInput.value = '';
                 } else {
@@ -314,6 +316,44 @@
             }
         }
 
+        async function loadAvailableBadges() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/admin/badges`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to load badges');
+                }
+
+                availableBadges = await response.json();
+            } catch (error) {
+                console.error('Load badges error:', error);
+                availableBadges = [];
+            }
+        }
+
+        async function updateUserBadges(userId, action, badges) {
+            return fetch(`${API_BASE_URL}/admin/users/${userId}/badges`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ action, badges })
+            });
+        }
+
+        function parseBadgeInput(input) {
+            if (!input) {
+                return [];
+            }
+            return input
+                .split(',')
+                .map(item => item.trim().toLowerCase())
+                .filter(Boolean);
+        }
+
         function showAdminPanel() {
             loginForm.classList.add('hidden');
             adminPanel.classList.remove('hidden');
@@ -340,14 +380,16 @@
                     userCard.setAttribute('data-id', user.id);
                     userCard.setAttribute('data-email', user.email);
                     userCard.setAttribute('data-name', user.name);
+                    userCard.setAttribute('data-badges', (user.badges || []).join(','));
                     userCard.setAttribute('data-user-card', 'true');
 
                     const badgeMarkup = (user.badges || []).map(badge => `
                         <span class="inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-full bg-sky-100 text-sky-600">
                             <i data-lucide="medal" class="w-3.5 h-3.5"></i>
-                            ${badge}
+                            ${formatBadgeLabel(badge)}
                         </span>
                     `).join('');
+                    const badgeSection = badgeMarkup || '<span class="text-xs text-gray-400">Бейджи отсутствуют</span>';
 
                     userCard.innerHTML = `
                         <div class="flex-1">
@@ -371,13 +413,25 @@
                                     <i data-lucide="zap" class="w-4 h-4"></i>
                                     ${user.pro?.status ? 'PRO аккаунт' : 'Бесплатный аккаунт'}
                                 </span>
-                                ${badgeMarkup}
+                                ${badgeSection}
                             </div>
                         </div>
-                        <div class="flex items-center gap-2">
+                        <div class="flex flex-wrap items-center gap-2 justify-end">
                             <button class="px-4 py-2 rounded-xl border border-indigo-100 text-indigo-600 hover:bg-indigo-50 transition text-sm font-semibold"
                                 data-action="toggle-pro" data-id="${user.id}" data-status="${!user.pro?.status}">
                                 ${user.pro?.status ? 'Снять PRO' : 'Выдать PRO'}
+                            </button>
+                            <button class="px-4 py-2 rounded-xl border border-sky-100 text-sky-600 hover:bg-sky-50 transition text-sm font-semibold"
+                                data-action="grant-badge" data-id="${user.id}">
+                                Выдать бейдж
+                            </button>
+                            ${user.badges?.length ? `<button class="px-4 py-2 rounded-xl border border-amber-100 text-amber-600 hover:bg-amber-50 transition text-sm font-semibold"
+                                data-action="revoke-badge" data-id="${user.id}">
+                                Снять бейдж
+                            </button>` : ''}
+                            <button class="px-4 py-2 rounded-xl border border-rose-100 text-rose-600 hover:bg-rose-50 transition text-sm font-semibold"
+                                data-action="delete-user" data-id="${user.id}" data-name="${escapeHtml(user.name || user.email)}">
+                                Удалить
                             </button>
                         </div>
                     `;
@@ -393,41 +447,112 @@
         }
 
         usersList.addEventListener('click', async (event) => {
-            const target = event.target.closest('[data-action="toggle-pro"]');
-            if (!target) {
+            const button = event.target.closest('[data-action]');
+            if (!button) {
                 return;
             }
 
-            const userId = target.getAttribute('data-id');
-            const makePro = target.getAttribute('data-status') === 'true';
+            const action = button.getAttribute('data-action');
+            const userId = button.getAttribute('data-id');
+            const userCard = button.closest('[data-user-card="true"]');
+
+            const setLoading = (state) => {
+                button.disabled = state;
+                button.classList.toggle('opacity-70', state);
+            };
 
             try {
-                target.disabled = true;
-                target.classList.add('opacity-70');
+                if (action === 'toggle-pro') {
+                    const makePro = button.getAttribute('data-status') === 'true';
+                    setLoading(true);
 
-                const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/pro`, {
-                    method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                    },
-                    body: JSON.stringify({ status: makePro })
-                });
+                    const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/pro`, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: JSON.stringify({ status: makePro })
+                    });
 
-                const data = await response.json();
+                    const data = await response.json();
 
-                if (response.ok) {
-                    showToast(`Статус пользователя обновлён: ${makePro ? 'PRO активирован' : 'PRO деактивирован'}`, 'success');
-                    loadUsers();
-                } else {
-                    showToast(data.message || 'Не удалось обновить статус пользователя', 'error');
+                    if (response.ok) {
+                        showToast(`Статус пользователя обновлён: ${makePro ? 'PRO активирован' : 'PRO деактивирован'}`, 'success');
+                        loadUsers();
+                    } else {
+                        showToast(data.message || 'Не удалось обновить статус пользователя', 'error');
+                    }
+                } else if (action === 'grant-badge') {
+                    const hint = availableBadges.length ? `Доступные бейджи: ${availableBadges.join(', ')}` : 'Пока нет сохранённых бейджей';
+                    const input = prompt(`Введите бейджи через запятую. ${hint}`);
+                    const badges = parseBadgeInput(input);
+                    if (!badges.length) {
+                        return;
+                    }
+
+                    setLoading(true);
+                    const response = await updateUserBadges(userId, 'grant', badges);
+
+                    if (response.ok) {
+                        showToast('Бейджи успешно выданы', 'success');
+                        availableBadges = Array.from(new Set([...availableBadges, ...badges]));
+                        loadUsers();
+                    } else {
+                        const data = await response.json();
+                        showToast(data.message || 'Не удалось выдать бейджи', 'error');
+                    }
+                } else if (action === 'revoke-badge') {
+                    const currentBadges = (userCard?.getAttribute('data-badges') || '').split(',').map(b => b.trim()).filter(Boolean);
+                    if (!currentBadges.length) {
+                        showToast('У пользователя нет бейджей для удаления', 'info');
+                        return;
+                    }
+
+                    const hint = `Текущие бейджи: ${currentBadges.join(', ')}`;
+                    const input = prompt(`Укажите бейджи для снятия через запятую. ${hint}`);
+                    const badges = parseBadgeInput(input).filter(badge => currentBadges.includes(badge));
+
+                    if (!badges.length) {
+                        showToast('Не выбрано ни одного существующего бейджа', 'info');
+                        return;
+                    }
+
+                    setLoading(true);
+                    const response = await updateUserBadges(userId, 'revoke', badges);
+                    if (response.ok) {
+                        showToast('Бейджи сняты', 'success');
+                        loadUsers();
+                    } else {
+                        const data = await response.json();
+                        showToast(data.message || 'Не удалось снять бейджи', 'error');
+                    }
+                } else if (action === 'delete-user') {
+                    const userName = button.getAttribute('data-name') || `ID ${userId}`;
+                    if (!confirm(`Удалить пользователя «${userName}» без возможности восстановления?`)) {
+                        return;
+                    }
+
+                    setLoading(true);
+                    const response = await fetch(`${API_BASE_URL}/admin/users/${userId}`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+
+                    const data = await response.json();
+                    if (response.ok) {
+                        showToast(data.message || 'Пользователь удалён', 'success');
+                        loadUsers();
+                        loadAvailableBadges();
+                    } else {
+                        showToast(data.message || 'Не удалось удалить пользователя', 'error');
+                    }
                 }
             } catch (error) {
-                console.error('Update PRO status error:', error);
-                showToast('Ошибка при обновлении статуса', 'error');
+                console.error('Admin action error:', error);
+                showToast('Произошла ошибка при выполнении действия', 'error');
             } finally {
-                target.disabled = false;
-                target.classList.remove('opacity-70');
+                setLoading(false);
             }
         });
 
@@ -462,6 +587,13 @@
         function getInitials(name) {
             if (!name) return 'AI';
             return name.split(' ').slice(0, 2).map(part => part.charAt(0).toUpperCase()).join('') || 'AI';
+        }
+
+        function formatBadgeLabel(badge) {
+            if (!badge) {
+                return '';
+            }
+            return badge.charAt(0).toUpperCase() + badge.slice(1);
         }
 
         function escapeHtml(value) {

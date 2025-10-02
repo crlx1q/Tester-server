@@ -255,6 +255,52 @@ const userExistsByEmail = async (email) => {
   return Boolean(exists);
 };
 
+const grantBadgesToUser = async (uid, badgeKeys = []) => {
+  if (!uid || !Array.isArray(badgeKeys) || badgeKeys.length === 0) {
+    return;
+  }
+
+  await Promise.all(badgeKeys.map(async (badgeKey) => {
+    const normalizedKey = badgeKey.trim().toLowerCase();
+    if (!normalizedKey) {
+      return;
+    }
+
+    try {
+      await Badge.updateOne(
+        { key: normalizedKey },
+        { $addToSet: { holders: uid.toString() } },
+        { upsert: true }
+      );
+    } catch (error) {
+      console.error(`[BADGES][ERROR] Не удалось выдать бейдж ${normalizedKey} пользователю ${uid}.`, error);
+      throw error;
+    }
+  }));
+};
+
+const revokeBadgesFromUser = async (uid, badgeKeys = []) => {
+  if (!uid || !Array.isArray(badgeKeys) || badgeKeys.length === 0) {
+    return;
+  }
+
+  await Badge.updateMany(
+    { key: { $in: badgeKeys.map((key) => key.trim().toLowerCase()).filter(Boolean) } },
+    { $pull: { holders: uid.toString() } }
+  );
+};
+
+const wipeUserBadges = async (uid) => {
+  if (!uid) {
+    return;
+  }
+
+  await Badge.updateMany(
+    {},
+    { $pull: { holders: uid.toString() } }
+  );
+};
+
 // Middleware
 app.set('trust proxy', Number(process.env.TRUST_PROXY || 1));
 
@@ -553,6 +599,80 @@ app.post('/admin/reload-badges', authenticateJWT, isAdmin, async (req, res) => {
   } catch (error) {
     console.error('[ADMIN][ERROR] Не удалось обновить бейджи.', error);
     res.status(500).json({ success: false, message: 'Не удалось обновить бейджи' });
+  }
+});
+
+app.get('/admin/badges', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const badgeDocs = await Badge.find({}, { key: 1, _id: 0 }).lean();
+    const badges = badgeDocs
+      .map((badge) => badge.key)
+      .filter((key) => typeof key === 'string' && key.trim().length > 0);
+
+    res.json([...new Set(badges)]);
+  } catch (error) {
+    console.error('[ADMIN][ERROR] Не удалось получить список бейджей.', error);
+    res.status(500).json({ success: false, message: 'Не удалось получить список бейджей' });
+  }
+});
+
+app.post('/admin/users/:userId/badges', authenticateJWT, isAdmin, async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  const { action, badges } = req.body || {};
+
+  if (!Number.isFinite(userId)) {
+    return res.status(400).json({ success: false, message: 'Некорректный идентификатор пользователя' });
+  }
+
+  if (!Array.isArray(badges) || badges.length === 0) {
+    return res.status(400).json({ success: false, message: 'Не переданы бейджи для изменения' });
+  }
+
+  try {
+    const user = await findUserById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    }
+
+    if (action === 'grant') {
+      await grantBadgesToUser(user.uid, badges);
+    } else if (action === 'revoke') {
+      await revokeBadgesFromUser(user.uid, badges);
+    } else {
+      return res.status(400).json({ success: false, message: 'Некорректное действие. Используйте grant или revoke.' });
+    }
+
+    res.json({ success: true, user: await buildUserResponse(user) });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] Не удалось изменить бейджи пользователя.', error);
+    res.status(500).json({ success: false, message: 'Не удалось изменить бейджи пользователя' });
+  }
+});
+
+app.delete('/admin/users/:userId', authenticateJWT, isAdmin, async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+
+  if (!Number.isFinite(userId)) {
+    return res.status(400).json({ success: false, message: 'Некорректный идентификатор пользователя' });
+  }
+
+  try {
+    const user = await findUserById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Пользователь не найден' });
+    }
+
+    await wipeUserBadges(user.uid);
+    await User.deleteOne({ id: userId });
+
+    const normalizedEmail = normalizeEmail(user.email);
+    registrationCodes.delete(normalizedEmail);
+    passwordResetCodes.delete(normalizedEmail);
+
+    res.json({ success: true, message: 'Пользователь полностью удален' });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] Не удалось удалить пользователя.', error);
+    res.status(500).json({ success: false, message: 'Не удалось удалить пользователя' });
   }
 });
 
