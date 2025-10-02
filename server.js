@@ -614,31 +614,6 @@ const syncServerVersion = () => {
   broadcastUpdate();
 };
 
-const SEMVER_REGEX = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/;
-
-const updatePackageVersion = async (version) => {
-  const sanitizedVersion = String(version || '').trim();
-  if (!SEMVER_REGEX.test(sanitizedVersion)) {
-    throw new Error('INVALID_VERSION');
-  }
-
-  const raw = await fsp.readFile(packageJsonPath, 'utf-8');
-  const pkg = JSON.parse(raw);
-  pkg.version = sanitizedVersion;
-  await fsp.writeFile(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf-8');
-
-  serverVersion = sanitizedVersion;
-  latestVersionInfo = {
-    ...latestVersionInfo,
-    version: sanitizedVersion,
-    title: latestVersionInfo.title || buildDefaultTitle(sanitizedVersion),
-    message: latestVersionInfo.message || buildDefaultMessage(sanitizedVersion),
-    publishedAt: new Date().toISOString(),
-  };
-
-  broadcastUpdate('version_updated');
-};
-
 if (fs.existsSync(packageJsonPath)) {
   fs.watch(packageJsonPath, { persistent: false }, () => {
     setTimeout(syncServerVersion, 200);
