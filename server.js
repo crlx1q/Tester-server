@@ -11,6 +11,7 @@ const http = require('http');
 const https = require('https');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcrypt');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -20,6 +21,7 @@ const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '8h';
 const secureCookie = ((process.env.COOKIE_SECURE || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
+const BCRYPT_SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS) || 10;
 
 const logSecretStatus = (name, value) => {
   if (value) {
@@ -78,6 +80,44 @@ const normalizeUser = (user) => {
   }
 
   return modified;
+};
+
+const isBcryptHash = (value) => typeof value === 'string' && value.startsWith('$2');
+
+const hashPasswordSyncIfNeeded = (user) => {
+  if (!user || !user.password) {
+    return false;
+  }
+
+  if (isBcryptHash(user.password)) {
+    return false;
+  }
+
+  try {
+    user.password = bcrypt.hashSync(user.password, BCRYPT_SALT_ROUNDS);
+    console.log(`[SECURITY] Пароль пользователя ID=${user.id} был автоматически сконвертирован в bcrypt.`);
+    return true;
+  } catch (error) {
+    console.error('[SECURITY][ERROR] Не удалось хешировать пароль пользователя при инициализации.', error);
+    return false;
+  }
+};
+
+const verifyPassword = async (plainPassword, storedPassword) => {
+  if (!storedPassword) {
+    return false;
+  }
+
+  if (isBcryptHash(storedPassword)) {
+    try {
+      return await bcrypt.compare(plainPassword, storedPassword);
+    } catch (error) {
+      console.error('[SECURITY][ERROR] Сбой при сравнении пароля.', error);
+      return false;
+    }
+  }
+
+  return storedPassword === plainPassword;
 };
 
 const ensureDbFile = () => {
@@ -177,7 +217,10 @@ const initializeUsers = () => {
   let hasChanges = false;
 
   db.users.forEach((user) => {
-    if (normalizeUser(user)) {
+    const uidUpdated = normalizeUser(user);
+    const passwordUpdated = hashPasswordSyncIfNeeded(user);
+
+    if (uidUpdated || passwordUpdated) {
       hasChanges = true;
     }
   });
@@ -581,7 +624,7 @@ const generateCode = () => Math.floor(100000 + Math.random() * 900000).toString(
 // --- Эндпоинты для аутентификации ---
 
 // Регистрация нового пользователя
-app.post('/auth/register', authLimiter, (req, res) => {
+app.post('/auth/register', authLimiter, async (req, res) => {
   const { email, password, name, verificationCode } = req.body;
 
   if (!email || !password || !name || !verificationCode) {
@@ -623,10 +666,18 @@ app.post('/auth/register', authLimiter, (req, res) => {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
+  let hashedPassword;
+  try {
+    hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+  } catch (error) {
+    console.error('[SECURITY][ERROR] Не удалось хешировать пароль нового пользователя.', error);
+    return res.status(500).json({ message: 'Не удалось обработать пароль. Попробуйте позже.' });
+  }
+
   const newUser = {
     id: db.userIdCounter,
     email: trimmedEmail,
-    password, // В реальном приложении пароли нужно хешировать!
+    password: hashedPassword,
     name: trimmedName,
     avatarUrl: '', // Поле для будущей аватарки
     pro: {
@@ -682,16 +733,16 @@ app.post('/auth/request-code', codeLimiter, (req, res) => {
 });
 
 // Вход пользователя
-app.post('/auth/login', authLimiter, (req, res) => {
+app.post('/auth/login', authLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
     return res.status(400).json({ message: 'Email и пароль обязательны для заполнения' });
   }
 
-  const user = db.users.find(user => user.email === email && user.password === password);
+  const user = db.users.find(user => user.email === email);
 
-  if (!user) {
+  if (!user || !(await verifyPassword(password, user.password))) {
     return res.status(401).json({ message: 'Неверный email или пароль' });
   }
   
@@ -764,7 +815,7 @@ app.put('/profile/:userId', (req, res) => {
 });
 
 // Смена пароля пользователя
-app.put('/profile/:userId/password', (req, res) => {
+app.put('/profile/:userId/password', async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   const { currentPassword, newPassword } = req.body;
 
@@ -782,12 +833,17 @@ app.put('/profile/:userId/password', (req, res) => {
   }
 
   // Проверяем текущий пароль
-  if (user.password !== currentPassword) {
+  if (!(await verifyPassword(currentPassword, user.password))) {
     return res.status(401).json({ message: 'Неверный текущий пароль' });
   }
 
   // Обновляем пароль
-  user.password = newPassword;
+  try {
+    user.password = await bcrypt.hash(newPassword, BCRYPT_SALT_ROUNDS);
+  } catch (error) {
+    console.error('[SECURITY][ERROR] Не удалось хешировать новый пароль пользователя.', error);
+    return res.status(500).json({ message: 'Не удалось изменить пароль. Попробуйте позже.' });
+  }
   saveDb();
   
   console.log(`Password updated for user ${user.email}`);
