@@ -635,7 +635,7 @@ app.post('/admin/login', (req, res) => {
 
   const token = issueAdminToken();
   setAuthCookie(res, token, 8 * 60 * 60 * 1000);
-  res.json({ success: true });
+  res.json({ success: true, token, expiresIn: ADMIN_JWT_EXPIRES_IN });
 });
 
 app.get('/admin/verify-token', authenticateJWT, isAdmin, (req, res) => {
@@ -837,9 +837,7 @@ app.post('/auth/request-code', codeRequestLimiter, (req, res) => {
     failedAttempts: 0,
   });
 
-  if (EXPOSE_DEBUG_CODES) {
-    console.log(`[DEBUG] Registration code for ${normalizedEmail}: ${code}`);
-  }
+  console.log(`[SECURITY][CODE] Registration code for ${normalizedEmail}: ${code}`);
 
   const responsePayload = {
     message: 'Код подтверждения отправлен на вашу почту',
