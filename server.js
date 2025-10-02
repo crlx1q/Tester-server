@@ -12,16 +12,36 @@ const https = require('https');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcrypt');
+const mongoose = require('mongoose');
 
 const app = express();
 const port = process.env.PORT || 3000;
-const dbPath = path.join(__dirname, 'db.json');
-const badgesPath = path.join(__dirname, 'badges.json');
 const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '8h';
 const secureCookie = ((process.env.COOKIE_SECURE || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
 const BCRYPT_SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS) || 10;
+
+const MONGO_USER = process.env.USERDB;
+const MONGO_PASS = process.env.PASSWDB;
+const MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'AIStudyMate';
+const MONGO_HOST = process.env.MONGO_HOST || 'aistudymate.9ye4bug.mongodb.net';
+const MONGO_APP_NAME = process.env.MONGO_APP_NAME || 'AIStudyMate';
+
+const buildMongoUri = () => {
+  if (process.env.MONGO_URI) {
+    return process.env.MONGO_URI;
+  }
+
+  if (!MONGO_USER || !MONGO_PASS) {
+    console.warn('[BOOT][WARN] USERDB или PASSWDB не заданы. Подключение к MongoDB не будет установлено.');
+    return null;
+  }
+
+  return `mongodb+srv://${encodeURIComponent(MONGO_USER)}:${encodeURIComponent(MONGO_PASS)}@${MONGO_HOST}/${MONGO_DB_NAME}?retryWrites=true&w=majority&appName=${encodeURIComponent(MONGO_APP_NAME)}`;
+};
+
+const mongoUri = buildMongoUri();
 
 const logSecretStatus = (name, value) => {
   if (value) {
@@ -33,6 +53,8 @@ const logSecretStatus = (name, value) => {
 
 logSecretStatus('ADMIN_PASSW', adminPassword);
 logSecretStatus('JWT_SECRET', JWT_SECRET);
+logSecretStatus('USERDB', MONGO_USER);
+logSecretStatus('PASSWDB', MONGO_PASS ? '********' : '');
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://urban-shanta-chapter1-cr1-372ff024.koyeb.app',
@@ -52,56 +74,7 @@ const UID_PREFIX = '700';
 const UID_LENGTH = 10;
 const UID_RANDOM_LENGTH = UID_LENGTH - UID_PREFIX.length;
 
-const usedUids = new Set();
-
-const generateUid = () => {
-  let uid;
-  do {
-    const randomPart = Math.floor(Math.random() * Math.pow(10, UID_RANDOM_LENGTH))
-      .toString()
-      .padStart(UID_RANDOM_LENGTH, '0');
-    uid = `${UID_PREFIX}${randomPart}`;
-  } while (usedUids.has(uid));
-
-  usedUids.add(uid);
-  return uid;
-};
-
-const normalizeUser = (user) => {
-  let modified = false;
-
-  const hasValidUid = typeof user.uid === 'string' && /^\d{10}$/.test(user.uid) && user.uid.startsWith(UID_PREFIX) && !usedUids.has(user.uid);
-
-  if (!hasValidUid) {
-    user.uid = generateUid();
-    modified = true;
-  } else {
-    usedUids.add(user.uid);
-  }
-
-  return modified;
-};
-
 const isBcryptHash = (value) => typeof value === 'string' && value.startsWith('$2');
-
-const hashPasswordSyncIfNeeded = (user) => {
-  if (!user || !user.password) {
-    return false;
-  }
-
-  if (isBcryptHash(user.password)) {
-    return false;
-  }
-
-  try {
-    user.password = bcrypt.hashSync(user.password, BCRYPT_SALT_ROUNDS);
-    console.log(`[SECURITY] Пароль пользователя ID=${user.id} был автоматически сконвертирован в bcrypt.`);
-    return true;
-  } catch (error) {
-    console.error('[SECURITY][ERROR] Не удалось хешировать пароль пользователя при инициализации.', error);
-    return false;
-  }
-};
 
 const verifyPassword = async (plainPassword, storedPassword) => {
   if (!storedPassword) {
@@ -120,186 +93,166 @@ const verifyPassword = async (plainPassword, storedPassword) => {
   return storedPassword === plainPassword;
 };
 
-const ensureDbFile = () => {
-  if (!fs.existsSync(dbPath)) {
-    fs.writeFileSync(dbPath, JSON.stringify({ users: [], userIdCounter: 1 }, null, 2));
+const DEFAULT_BADGE_KEYS = ['beta', 'designer', 'programmer'];
+
+const counterSchema = new mongoose.Schema({
+  key: { type: String, unique: true, required: true },
+  value: { type: Number, required: true, default: 0 },
+}, { versionKey: false });
+
+const userSchema = new mongoose.Schema({
+  id: { type: Number, unique: true, index: true, required: true },
+  uid: { type: String, unique: true, index: true, required: true },
+  email: { type: String, unique: true, required: true, index: true, lowercase: true, trim: true },
+  password: { type: String, required: true },
+  name: { type: String, required: true, trim: true },
+  avatarUrl: { type: String, default: '' },
+  pro: {
+    status: { type: Boolean, default: false },
+    startDate: { type: Date, default: null },
+    endDate: { type: Date, default: null },
+    updatedAt: { type: Date, default: null },
+  },
+  createdAt: { type: Date, default: Date.now },
+}, { versionKey: false });
+
+const badgeSchema = new mongoose.Schema({
+  key: { type: String, unique: true, required: true },
+  holders: { type: [String], default: [] },
+}, { versionKey: false });
+
+const Counter = mongoose.model('Counter', counterSchema);
+const User = mongoose.model('User', userSchema);
+const Badge = mongoose.model('Badge', badgeSchema);
+
+mongoose.connection.on('error', (error) => {
+  console.error('[MONGO][ERROR]', error);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('[MONGO] Соединение с MongoDB потеряно.');
+});
+
+const ensureDefaultBadges = async () => {
+  for (const key of DEFAULT_BADGE_KEYS) {
+    try {
+      await Badge.updateOne(
+        { key },
+        { $setOnInsert: { holders: [] } },
+        { upsert: true }
+      );
+    } catch (error) {
+      console.error(`[MONGO][ERROR] Не удалось обеспечить наличие бейджа ${key}.`, error);
+    }
   }
 };
 
-const ensureBadgesFile = () => {
-  if (!fs.existsSync(badgesPath)) {
-    const defaultBadges = {
-      beta: [],
-      designer: [],
-      programmer: [],
-    };
-    fs.writeFileSync(badgesPath, JSON.stringify(defaultBadges, null, 2));
+const initializeMongo = async () => {
+  if (!mongoUri) {
+    return;
   }
-};
-
-const loadDb = () => {
-  ensureDbFile();
 
   try {
-    const raw = fs.readFileSync(dbPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-
-    const users = Array.isArray(parsed.users) ? parsed.users : [];
-    const userIdCounter = Number.isInteger(parsed.userIdCounter) ? parsed.userIdCounter : 1;
-
-    return { users, userIdCounter };
-  } catch (error) {
-    console.error('Не удалось загрузить базу данных. Будет создана новая.', error);
-    return { users: [], userIdCounter: 1 };
-  }
-};
-
-const loadBadges = () => {
-  ensureBadgesFile();
-
-  try {
-    const raw = fs.readFileSync(badgesPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-
-    const entries = ['beta', 'designer', 'programmer'];
-    const normalized = {};
-
-    entries.forEach((key) => {
-      const value = parsed[key];
-      if (Array.isArray(value)) {
-        normalized[key] = [...new Set(value.map(String))];
-      } else {
-        normalized[key] = [];
-      }
+    await mongoose.connect(mongoUri, {
+      maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || 10),
     });
-
-    // Сохраняем любые дополнительные кастомные бейджи
-    Object.keys(parsed).forEach((key) => {
-      if (!normalized[key]) {
-        const value = parsed[key];
-        normalized[key] = Array.isArray(value) ? [...new Set(value.map(String))] : [];
-      }
-    });
-
-    return normalized;
+    console.log('[BOOT] Установлено соединение с MongoDB Atlas.');
+    await ensureDefaultBadges();
   } catch (error) {
-    console.error('Не удалось загрузить файл бейджей. Будет создан новый.', error);
-    const fallback = {
-      beta: [],
-      designer: [],
-      programmer: [],
-    };
-    fs.writeFileSync(badgesPath, JSON.stringify(fallback, null, 2));
-    return fallback;
+    console.error('[BOOT][ERROR] Не удалось подключиться к MongoDB.', error);
   }
 };
 
-let db = loadDb();
-let isSavingDb = false;
-let badges = loadBadges();
-let isSavingBadges = false;
+initializeMongo().catch((error) => {
+  console.error('[BOOT][ERROR] Ошибка инициализации MongoDB.', error);
+});
 
-const saveDb = () => {
-  try {
-    isSavingDb = true;
-    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
-    setTimeout(() => {
-      isSavingDb = false;
-    }, 50);
-  } catch (error) {
-    console.error('Не удалось сохранить базу данных', error);
-    isSavingDb = false;
-  }
+const getNextSequence = async (sequenceKey) => {
+  const counter = await Counter.findOneAndUpdate(
+    { key: sequenceKey },
+    { $inc: { value: 1 } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  ).lean();
+  return counter.value;
 };
 
-const initializeUsers = () => {
-  usedUids.clear();
-  let hasChanges = false;
-
-  db.users.forEach((user) => {
-    const uidUpdated = normalizeUser(user);
-    const passwordUpdated = hashPasswordSyncIfNeeded(user);
-
-    if (uidUpdated || passwordUpdated) {
-      hasChanges = true;
+const generateUid = async () => {
+  while (true) {
+    const randomPart = Math.floor(Math.random() * Math.pow(10, UID_RANDOM_LENGTH))
+      .toString()
+      .padStart(UID_RANDOM_LENGTH, '0');
+    const uid = `${UID_PREFIX}${randomPart}`;
+    const exists = await User.exists({ uid });
+    if (!exists) {
+      return uid;
     }
-  });
-
-  if (hasChanges) {
-    saveDb();
   }
 };
 
-initializeUsers();
-
-const saveBadges = () => {
-  try {
-    isSavingBadges = true;
-    fs.writeFileSync(badgesPath, JSON.stringify(badges, null, 2));
-    setTimeout(() => {
-      isSavingBadges = false;
-    }, 50);
-  } catch (error) {
-    console.error('Не удалось сохранить файл бейджей', error);
-    isSavingBadges = false;
-  }
-};
-
-const reloadDb = () => {
-  try {
-    db = loadDb();
-    initializeUsers();
-    console.log('База данных перезагружена из файла');
-  } catch (error) {
-    console.error('Не удалось перезагрузить базу данных', error);
-  }
-};
-
-if (fs.existsSync(dbPath)) {
-  fs.watch(dbPath, { persistent: false }, () => {
-    if (isSavingDb) {
-      return;
-    }
-    reloadDb();
-  });
-}
-
-const reloadBadges = () => {
-  try {
-    badges = loadBadges();
-    console.log('Файл бейджей перезагружен');
-  } catch (error) {
-    console.error('Не удалось перезагрузить бейджи', error);
-  }
-};
-
-if (fs.existsSync(badgesPath)) {
-  fs.watch(badgesPath, { persistent: false }, () => {
-    if (isSavingBadges) {
-      return;
-    }
-    reloadBadges();
-  });
-}
-
-const getBadgesForUid = (uid) => {
+const getBadgesForUid = async (uid) => {
   if (!uid) {
     return [];
   }
 
   const normalizedUid = uid.toString();
-  return Object.keys(badges).filter((badgeKey) => {
-    const holders = badges[badgeKey];
-    return Array.isArray(holders) && holders.map(String).includes(normalizedUid);
-  });
+  const badgeDocs = await Badge.find({ holders: normalizedUid }, { key: 1, _id: 0 }).lean();
+  return badgeDocs.map((badge) => badge.key);
 };
 
-const buildUserResponse = (user) => {
-  const { password: _, ...userResponse } = user;
+const buildUserResponse = async (userDoc) => {
+  if (!userDoc) {
+    return null;
+  }
+
+  const user = userDoc.toObject ? userDoc.toObject() : { ...userDoc };
+  const { password, ...rest } = user;
+
+  if (rest.createdAt instanceof Date) {
+    rest.createdAt = rest.createdAt.toISOString();
+  }
+
+  if (rest.pro) {
+    if (rest.pro.startDate instanceof Date) {
+      rest.pro.startDate = rest.pro.startDate.toISOString();
+    }
+    if (rest.pro.endDate instanceof Date) {
+      rest.pro.endDate = rest.pro.endDate.toISOString();
+    }
+    if (rest.pro.updatedAt instanceof Date) {
+      rest.pro.updatedAt = rest.pro.updatedAt.toISOString();
+    }
+  }
+
   return {
-    ...userResponse,
-    badges: getBadgesForUid(user.uid),
+    ...rest,
+    badges: await getBadgesForUid(user.uid),
   };
+};
+
+const normalizeEmail = (email = '') => email.trim().toLowerCase();
+
+const findUserById = async (userId) => {
+  if (!Number.isFinite(userId)) {
+    return null;
+  }
+  return User.findOne({ id: userId });
+};
+
+const findUserByEmail = async (email) => {
+  const normalized = normalizeEmail(email);
+  if (!normalized) {
+    return null;
+  }
+  return User.findOne({ email: normalized });
+};
+
+const userExistsByEmail = async (email) => {
+  const normalized = normalizeEmail(email);
+  if (!normalized) {
+    return false;
+  }
+  const exists = await User.exists({ email: normalized });
+  return Boolean(exists);
 };
 
 // Middleware
@@ -365,13 +318,23 @@ const authLimiter = rateLimit({
   message: { message: 'Слишком много попыток. Повторите позже.' }
 });
 
-const codeLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
+const buildCodeLimiter = (message) => rateLimit({
+  windowMs: 10 * 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Слишком много запросов кода. Попробуйте позже.' }
+  message: { message },
+  keyGenerator: (req) => {
+    const email = req.body?.email;
+    if (typeof email === 'string' && email.trim()) {
+      return email.trim().toLowerCase();
+    }
+    return req.ip;
+  }
 });
+
+const registrationCodeLimiter = buildCodeLimiter('Слишком много запросов кода. Попробуйте позже.');
+const passwordResetLimiter = buildCodeLimiter('Слишком много запросов кода сброса. Попробуйте позже.');
 
 app.use(generalLimiter);
 
@@ -532,52 +495,64 @@ app.get('/admin/verify-token', authenticateJWT, isAdmin, (req, res) => {
   res.json({ success: true });
 });
 
-app.get('/admin/users', authenticateJWT, isAdmin, (req, res) => {
-  const users = db.users.map(user => ({
-    ...user,
-    badges: getBadgesForUid(user.uid)
-  }));
-  res.json(users);
+app.get('/admin/users', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const users = await User.find({}).lean();
+    const responses = await Promise.all(users.map((user) => buildUserResponse(user)));
+    res.json(responses.filter(Boolean));
+  } catch (error) {
+    console.error('[ADMIN][ERROR] Не удалось получить список пользователей.', error);
+    res.status(500).json({ success: false, message: 'Не удалось получить пользователей' });
+  }
 });
 
-app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, (req, res) => {
+app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   const { status } = req.body;
-  
-  const user = db.users.find(u => u.id === userId);
-  if (!user) {
-    return res.status(404).json({ success: false, message: 'User not found' });
+  if (!Number.isFinite(userId)) {
+    return res.status(400).json({ success: false, message: 'Некорректный идентификатор пользователя' });
   }
-  
-  user.pro = user.pro || {};
-  user.pro.status = status;
-  user.pro.updatedAt = new Date().toISOString();
-  
-  if (status) {
-    user.pro.startDate = user.pro.startDate || new Date().toISOString();
+
+  try {
+    const user = await findUserById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    user.pro = user.pro || {};
+    user.pro.status = Boolean(status);
+    user.pro.updatedAt = new Date();
+
+    if (user.pro.status && !user.pro.startDate) {
+      user.pro.startDate = new Date();
+    }
+
+    await user.save();
+
+    res.json({ success: true, user: await buildUserResponse(user) });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] Не удалось обновить статус PRO пользователя.', error);
+    res.status(500).json({ success: false, message: 'Не удалось обновить статус PRO' });
   }
-  
-  saveDb();
-  res.json({ success: true, user: buildUserResponse(user) });
 });
 
-app.post('/admin/reload-db', authenticateJWT, isAdmin, (req, res) => {
+app.post('/admin/reload-db', authenticateJWT, isAdmin, async (req, res) => {
   try {
-    reloadDb();
-    res.json({ success: true, message: 'Database reloaded successfully' });
+    await initializeMongo();
+    res.json({ success: true, message: 'Соединение с базой данных обновлено' });
   } catch (error) {
-    console.error('Reload DB error:', error);
-    res.status(500).json({ success: false, message: 'Failed to reload database' });
+    console.error('[ADMIN][ERROR] Не удалось переинициализировать базу данных.', error);
+    res.status(500).json({ success: false, message: 'Не удалось обновить соединение с базой данных' });
   }
 });
 
-app.post('/admin/reload-badges', authenticateJWT, isAdmin, (req, res) => {
+app.post('/admin/reload-badges', authenticateJWT, isAdmin, async (req, res) => {
   try {
-    reloadBadges();
-    res.json({ success: true, message: 'Badges reloaded successfully' });
+    await ensureDefaultBadges();
+    res.json({ success: true, message: 'Бейджи обновлены' });
   } catch (error) {
-    console.error('Reload badges error:', error);
-    res.status(500).json({ success: false, message: 'Failed to reload badges' });
+    console.error('[ADMIN][ERROR] Не удалось обновить бейджи.', error);
+    res.status(500).json({ success: false, message: 'Не удалось обновить бейджи' });
   }
 });
 
@@ -648,7 +623,9 @@ app.post('/auth/register', authLimiter, async (req, res) => {
     return res.status(400).json({ message: 'Имя обязательно для заполнения' });
   }
 
-  const storedCode = registrationCodes.get(trimmedEmail.toLowerCase());
+  const normalizedEmail = normalizeEmail(trimmedEmail);
+
+  const storedCode = registrationCodes.get(normalizedEmail);
   if (!storedCode) {
     return res.status(400).json({ message: 'Код подтверждения не запрошен или истек' });
   }
@@ -663,7 +640,7 @@ app.post('/auth/register', authLimiter, async (req, res) => {
     return res.status(400).json({ message: 'Неверный код подтверждения' });
   }
 
-  const userExists = db.users.find(user => user.email === trimmedEmail);
+  const userExists = await userExistsByEmail(normalizedEmail);
   if (userExists) {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
@@ -676,34 +653,34 @@ app.post('/auth/register', authLimiter, async (req, res) => {
     return res.status(500).json({ message: 'Не удалось обработать пароль. Попробуйте позже.' });
   }
 
-  const newUser = {
-    id: db.userIdCounter,
-    email: trimmedEmail,
-    password: hashedPassword,
-    name: trimmedName,
-    avatarUrl: '', // Поле для будущей аватарки
-    pro: {
-      status: false,
-      startDate: null,
-      endDate: null,
-    },
-    uid: generateUid(),
-    createdAt: new Date().toISOString(),
-  };
+  try {
+    const nextId = await getNextSequence('userId');
+    const uid = await generateUid();
+    const newUser = await User.create({
+      id: nextId,
+      email: normalizedEmail,
+      password: hashedPassword,
+      name: trimmedName,
+      avatarUrl: '',
+      pro: {
+        status: false,
+        startDate: null,
+        endDate: null,
+        updatedAt: null,
+      },
+      uid,
+    });
 
-  db.userIdCounter += 1;
-  db.users.push(newUser);
-  saveDb();
-  console.log('New user registered:', newUser);
-  console.log('All users:', db.users);
+    registrationCodes.delete(normalizedEmail);
 
-  registrationCodes.delete(trimmedEmail.toLowerCase());
-
-  // Отправляем пользователя без пароля
-  res.status(201).json(buildUserResponse(newUser));
+    res.status(201).json(await buildUserResponse(newUser));
+  } catch (error) {
+    console.error('[AUTH][ERROR] Не удалось создать нового пользователя.', error);
+    res.status(500).json({ message: 'Не удалось создать пользователя. Попробуйте позже.' });
+  }
 });
 
-app.post('/auth/request-code', codeLimiter, (req, res) => {
+app.post('/auth/request-code', registrationCodeLimiter, async (req, res) => {
   const { email } = req.body;
 
   if (!email) {
@@ -715,13 +692,14 @@ app.post('/auth/request-code', codeLimiter, (req, res) => {
     return res.status(400).json({ message: 'Введите корректный email' });
   }
 
-  const exists = db.users.some(user => user.email === trimmedEmail);
+  const normalizedEmail = normalizeEmail(trimmedEmail);
+  const exists = await userExistsByEmail(normalizedEmail);
   if (exists) {
     return res.status(409).json({ message: 'Пользователь с таким email уже существует' });
   }
 
   const code = generateCode();
-  registrationCodes.set(trimmedEmail.toLowerCase(), {
+  registrationCodes.set(normalizedEmail, {
     code,
     expiresAt: Date.now() + REG_CODE_TTL_MS,
   });
@@ -734,7 +712,7 @@ app.post('/auth/request-code', codeLimiter, (req, res) => {
   });
 });
 
-app.post('/auth/reset-password/request', codeLimiter, (req, res) => {
+app.post('/auth/reset-password/request', passwordResetLimiter, async (req, res) => {
   const { email } = req.body;
 
   if (!email) {
@@ -747,13 +725,14 @@ app.post('/auth/reset-password/request', codeLimiter, (req, res) => {
     return res.status(400).json({ message: 'Введите корректный email' });
   }
 
-  const user = db.users.find((u) => u.email === trimmedEmail);
+  const normalizedEmail = normalizeEmail(trimmedEmail);
+  const user = await findUserByEmail(normalizedEmail);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь с таким email не найден' });
   }
 
   const code = generateCode();
-  passwordResetCodes.set(trimmedEmail.toLowerCase(), {
+  passwordResetCodes.set(normalizedEmail, {
     code,
     userId: user.id,
     expiresAt: Date.now() + PASSWORD_RESET_TTL_MS,
@@ -784,13 +763,14 @@ app.post('/auth/reset-password/confirm', authLimiter, async (req, res) => {
     return res.status(400).json({ message: 'Введите корректный email' });
   }
 
-  const stored = passwordResetCodes.get(trimmedEmail.toLowerCase());
+  const normalizedEmail = normalizeEmail(trimmedEmail);
+  const stored = passwordResetCodes.get(normalizedEmail);
   if (!stored) {
     return res.status(400).json({ message: 'Код сброса не запрошен или истек' });
   }
 
   if (stored.expiresAt < Date.now()) {
-    passwordResetCodes.delete(trimmedEmail.toLowerCase());
+    passwordResetCodes.delete(normalizedEmail);
     return res.status(400).json({ message: 'Код сброса истек. Запросите новый' });
   }
 
@@ -798,21 +778,21 @@ app.post('/auth/reset-password/confirm', authLimiter, async (req, res) => {
     return res.status(400).json({ message: 'Неверный код сброса' });
   }
 
-  const user = db.users.find((u) => u.id === stored.userId && u.email === trimmedEmail);
-  if (!user) {
-    passwordResetCodes.delete(trimmedEmail.toLowerCase());
+  const user = await findUserById(stored.userId);
+  if (!user || normalizeEmail(user.email) !== normalizedEmail) {
+    passwordResetCodes.delete(normalizedEmail);
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
   try {
     user.password = await bcrypt.hash(newPassword, BCRYPT_SALT_ROUNDS);
+    await user.save();
   } catch (error) {
     console.error('[SECURITY][ERROR] Не удалось хешировать пароль при сбросе.', error);
     return res.status(500).json({ message: 'Не удалось сбросить пароль. Попробуйте позже.' });
   }
 
-  passwordResetCodes.delete(trimmedEmail.toLowerCase());
-  saveDb();
+  passwordResetCodes.delete(normalizedEmail);
 
   console.log(`Password reset for user ${user.email}`);
 
@@ -827,7 +807,7 @@ app.post('/auth/login', authLimiter, async (req, res) => {
     return res.status(400).json({ message: 'Email и пароль обязательны для заполнения' });
   }
 
-  const user = db.users.find(user => user.email === email);
+  const user = await findUserByEmail(email);
 
   if (!user || !(await verifyPassword(password, user.password))) {
     return res.status(401).json({ message: 'Неверный email или пароль' });
@@ -836,49 +816,63 @@ app.post('/auth/login', authLimiter, async (req, res) => {
   console.log('User logged in:', user);
 
   // Отправляем пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  res.status(200).json(await buildUserResponse(user));
 });
 
 // --- Эндпоинты для работы с профилем ---
 
 // Обновление аватарки пользователя
-app.post('/profile/avatar', (req, res) => {
+app.post('/profile/avatar', async (req, res) => {
   const { userId, avatarBase64 } = req.body;
 
   if (!userId || !avatarBase64) {
     return res.status(400).json({ message: 'ID пользователя и данные аватарки обязательны' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  const numericId = Number(userId);
+  if (!Number.isFinite(numericId)) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
+
+  const user = await findUserById(numericId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
   // Обновляем аватарку пользователя
   user.avatarUrl = avatarBase64;
-  saveDb();
+  try {
+    await user.save();
+  } catch (error) {
+    console.error('[PROFILE][ERROR] Не удалось сохранить аватар пользователя.', error);
+    return res.status(500).json({ message: 'Не удалось обновить аватар. Попробуйте позже.' });
+  }
   
   console.log(`Avatar updated for user ${user.email}`);
 
   // Отправляем обновленные данные пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  res.status(200).json(await buildUserResponse(user));
 });
 
 // Получение данных пользователя по ID
-app.get('/profile/:userId', (req, res) => {
+app.get('/profile/:userId', async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   
-  const user = db.users.find(user => user.id === userId);
+  if (!Number.isFinite(userId)) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
+
+  const user = await findUserById(userId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
   // Отправляем данные пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  res.status(200).json(await buildUserResponse(user));
 });
 
 // Обновление профиля пользователя (имя)
-app.put('/profile/:userId', (req, res) => {
+app.put('/profile/:userId', async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   const { name } = req.body;
 
@@ -886,19 +880,28 @@ app.put('/profile/:userId', (req, res) => {
     return res.status(400).json({ message: 'Имя обязательно для заполнения' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  if (!Number.isFinite(userId)) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
+
+  const user = await findUserById(userId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
 
   // Обновляем имя пользователя
   user.name = name.trim();
-  saveDb();
+  try {
+    await user.save();
+  } catch (error) {
+    console.error('[PROFILE][ERROR] Не удалось обновить имя пользователя.', error);
+    return res.status(500).json({ message: 'Не удалось обновить профиль. Попробуйте позже.' });
+  }
   
   console.log(`Profile updated for user ${user.email}: name = ${user.name}`);
 
   // Отправляем обновленные данные пользователя без пароля
-  res.status(200).json(buildUserResponse(user));
+  res.status(200).json(await buildUserResponse(user));
 });
 
 // Смена пароля пользователя
@@ -914,7 +917,11 @@ app.put('/profile/:userId/password', async (req, res) => {
     return res.status(400).json({ message: 'Новый пароль должен содержать минимум 6 символов' });
   }
 
-  const user = db.users.find(user => user.id === userId);
+  if (!Number.isFinite(userId)) {
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+  }
+
+  const user = await findUserById(userId);
   if (!user) {
     return res.status(404).json({ message: 'Пользователь не найден' });
   }
@@ -927,11 +934,11 @@ app.put('/profile/:userId/password', async (req, res) => {
   // Обновляем пароль
   try {
     user.password = await bcrypt.hash(newPassword, BCRYPT_SALT_ROUNDS);
+    await user.save();
   } catch (error) {
     console.error('[SECURITY][ERROR] Не удалось хешировать новый пароль пользователя.', error);
     return res.status(500).json({ message: 'Не удалось изменить пароль. Попробуйте позже.' });
   }
-  saveDb();
   
   console.log(`Password updated for user ${user.email}`);
 
