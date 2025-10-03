@@ -11,6 +11,7 @@ const cookieParser = require('cookie-parser');
 const http = require('http');
 const https = require('https');
 const helmet = require('helmet');
+const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcrypt');
 const mongoose = require('mongoose');
@@ -19,6 +20,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 const adminPassword = process.env.ADMIN_PASSW;
 const JWT_SECRET = process.env.JWT_SECRET;
+const AI_KEYS_SECRET = process.env.AI_KEYS_SECRET || process.env.JWT_SECRET || '';
 const JWT_EXPIRES_IN = '8h';
 const secureCookie = ((process.env.COOKIE_SECURE || '').toLowerCase() === 'true') || process.env.NODE_ENV === 'production';
 const BCRYPT_SALT_ROUNDS = Number(process.env.BCRYPT_SALT_ROUNDS) || 10;
@@ -234,6 +236,67 @@ const Setting = mongoose.model('Setting', settingsSchema);
 mongoose.connection.on('error', (error) => {
   console.error('[MONGO][ERROR]', error);
 });
+
+// === Secure storage for Gemini API key ===
+const GEMINI_SETTING_KEY = 'ai_gemini_key_v1';
+
+const deriveAesKey = (secret) => {
+  const normalized = String(secret || '').padEnd(32, '0').slice(0, 32);
+  return Buffer.from(normalized);
+};
+
+const encryptText = (plain, secret) => {
+  if (!secret) throw new Error('AI_KEYS_SECRET is not configured');
+  const key = deriveAesKey(secret);
+  const iv = crypto.randomBytes(12); // GCM IV
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    iv: iv.toString('base64'),
+    data: enc.toString('base64'),
+    tag: tag.toString('base64'),
+  };
+};
+
+const decryptText = (payload, secret) => {
+  if (!secret) throw new Error('AI_KEYS_SECRET is not configured');
+  if (!payload || !payload.iv || !payload.data || !payload.tag) return '';
+  const key = deriveAesKey(secret);
+  const iv = Buffer.from(payload.iv, 'base64');
+  const data = Buffer.from(payload.data, 'base64');
+  const tag = Buffer.from(payload.tag, 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  const dec = Buffer.concat([decipher.update(data), decipher.final()]);
+  return dec.toString('utf8');
+};
+
+const saveGeminiKey = async (apiKey) => {
+  const enc = encryptText(apiKey, AI_KEYS_SECRET);
+  const doc = {
+    enc,
+    last4: String(apiKey).slice(-4),
+    updatedAt: new Date(),
+  };
+  await Setting.updateOne(
+    { key: GEMINI_SETTING_KEY },
+    { $set: { value: doc } },
+    { upsert: true }
+  );
+  return { last4: doc.last4, updatedAt: doc.updatedAt };
+};
+
+const loadGeminiKey = async () => {
+  const doc = await Setting.findOne({ key: GEMINI_SETTING_KEY }, { value: 1, _id: 0 }).lean();
+  if (!doc?.value) return '';
+  try {
+    return decryptText(doc.value.enc, AI_KEYS_SECRET);
+  } catch (e) {
+    console.error('[AI][ERROR] Failed to decrypt Gemini key', e);
+    return '';
+  }
+};
 
 mongoose.connection.on('disconnected', () => {
   console.warn('[MONGO] Соединение с MongoDB потеряно.');
@@ -485,6 +548,172 @@ const buildCodeLimiter = (message) => rateLimit({
   }
 });
 
+// --- Admin: Gemini API key management ---
+app.post('/admin/ai/gemini-key', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const { apiKey } = req.body || {};
+    if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length < 10) {
+      return res.status(400).json({ success: false, message: 'Некорректный ключ API' });
+    }
+    const info = await saveGeminiKey(apiKey.trim());
+    res.json({ success: true, last4: info.last4, updatedAt: info.updatedAt });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] gemini-key', error);
+    res.status(500).json({ success: false, message: 'Не удалось сохранить ключ Gemini' });
+  }
+});
+
+app.get('/admin/ai/gemini-key', authenticateJWT, isAdmin, async (req, res) => {
+  try {
+    const doc = await Setting.findOne({ key: GEMINI_SETTING_KEY }, { value: 1, _id: 0 }).lean();
+    if (!doc?.value) {
+      return res.json({ configured: false });
+    }
+    res.json({ configured: true, last4: doc.value.last4, updatedAt: doc.value.updatedAt });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] get gemini-key', error);
+    res.status(500).json({ success: false, message: 'Не удалось получить статус ключа Gemini' });
+  }
+});
+
+// --- AI Proxy (Gemini) ---
+const callGemini = (apiKey, payload) => new Promise((resolve, reject) => {
+  const path = `/v1beta/models/gemini-2.0-flash-preview-12-20:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const options = {
+    hostname: 'generativelanguage.googleapis.com',
+    method: 'POST',
+    path,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  const req = https.request(options, (res2) => {
+    let raw = '';
+    res2.on('data', (chunk) => raw += chunk);
+    res2.on('end', () => {
+      try {
+        const json = JSON.parse(raw);
+        resolve(json);
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+  req.on('error', reject);
+  req.write(JSON.stringify(payload));
+  req.end();
+});
+
+const parseAnalysisResponse = (responseText = '') => {
+  const lines = String(responseText).split('\n');
+  let summary = '';
+  const keyPoints = [];
+  const questions = [];
+  let current = '';
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (lower.includes('сводка') || lower.includes('summary')) { current = 'summary'; continue; }
+    if (lower.includes('ключевые') || lower.includes('key points')) { current = 'keyPoints'; continue; }
+    if (lower.includes('вопрос') || lower.includes('question')) { current = 'questions'; continue; }
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (current === 'summary') {
+      summary += trimmed + ' ';
+    } else if (current === 'keyPoints') {
+      if (/^[\-•*]/.test(trimmed)) keyPoints.push(trimmed.slice(1).trim()); else if (trimmed.length > 10) keyPoints.push(trimmed);
+    } else if (current === 'questions') {
+      if (/^[\-•*]/.test(trimmed)) questions.push(trimmed.slice(1).trim()); else if (trimmed.length > 10) questions.push(trimmed);
+    }
+  }
+  if (!summary && keyPoints.length === 0 && questions.length === 0) {
+    summary = responseText.slice(0, 200);
+    keyPoints.push('Анализ документа выполнен', 'Информация обработана', 'Готово к изучению');
+    questions.push('Что является основной темой материала?', 'Какие ключевые концепции представлены?');
+  }
+  return { summary: summary.trim(), keyPoints: keyPoints.slice(0, 5), questions: questions.slice(0, 5) };
+};
+
+app.post('/ai/analyze-image', async (req, res) => {
+  try {
+    const { mimeType, base64Image, prompt } = req.body || {};
+    if (!mimeType || !base64Image) {
+      return res.status(400).json({ message: 'mimeType и base64Image обязательны' });
+    }
+    const apiKey = await loadGeminiKey();
+    if (!apiKey) {
+      return res.status(503).json({ message: 'Gemini API ключ не настроен' });
+    }
+    const payload = {
+      contents: [
+        { parts: [
+          { text: (prompt && String(prompt).trim()) || 'Проанализируй этот конспект. Предоставь краткую сводку (не более 150 слов), ключевые моменты (3-5 пунктов) и возможные вопросы для теста (3-5 вопросов). Ответь на русском языке.' },
+          { inlineData: { mimeType, data: base64Image } }
+        ]}
+      ],
+      generationConfig: { temperature: 0.7, topK: 40, topP: 0.95, maxOutputTokens: 1024 }
+    };
+    const result = await callGemini(apiKey, payload);
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    return res.json(parseAnalysisResponse(text));
+  } catch (error) {
+    console.error('[AI][ERROR] analyze-image', error);
+    return res.status(500).json({ message: 'Ошибка анализа изображения' });
+  }
+});
+
+app.post('/ai/analyze-text', async (req, res) => {
+  try {
+    const { transcription, prompt } = req.body || {};
+    if (!transcription || typeof transcription !== 'string') {
+      return res.status(400).json({ message: 'transcription обязателен' });
+    }
+    const apiKey = await loadGeminiKey();
+    if (!apiKey) {
+      return res.status(503).json({ message: 'Gemini API ключ не настроен' });
+    }
+    const payload = {
+      contents: [ { parts: [ { text: `Проанализируй эту расшифровку лекции: "${transcription}". Предоставь краткую сводку (не более 150 слов), ключевые моменты (3-5 пунктов) и возможные вопросы для теста (3-5 вопросов). Ответь на русском языке.` } ] } ],
+      generationConfig: { temperature: 0.7, topK: 40, topP: 0.95, maxOutputTokens: 1024 }
+    };
+    const result = await callGemini(apiKey, payload);
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    return res.json(parseAnalysisResponse(text));
+  } catch (error) {
+    console.error('[AI][ERROR] analyze-text', error);
+    return res.status(500).json({ message: 'Ошибка анализа текста' });
+  }
+});
+
+app.post('/ai/chat', async (req, res) => {
+  try {
+    const { message, history } = req.body || {};
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ message: 'message обязателен' });
+    }
+    const apiKey = await loadGeminiKey();
+    if (!apiKey) {
+      return res.status(503).json({ message: 'Gemini API ключ не настроен' });
+    }
+    const contents = [];
+    if (Array.isArray(history)) {
+      for (const msg of history) {
+        if (!msg || typeof msg.text !== 'string' || typeof msg.sender !== 'string') continue;
+        contents.push({ parts: [{ text: msg.text }], role: msg.sender === 'user' ? 'user' : 'model' });
+      }
+    }
+    contents.push({ parts: [{ text: message }], role: 'user' });
+    const payload = {
+      contents,
+      generationConfig: { temperature: 0.9, topK: 40, topP: 0.95, maxOutputTokens: 1024 },
+      systemInstruction: { parts: [{ text: 'Ты - AI-репетитор StudyMate. Помогай студентам с учебой, отвечай на вопросы, объясняй сложные концепции простым языком. Будь дружелюбным и поддерживающим. Отвечай на русском языке.' }] }
+    };
+    const result = await callGemini(apiKey, payload);
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || 'Извините, не удалось получить ответ.';
+    return res.json({ text });
+  } catch (error) {
+    console.error('[AI][ERROR] chat', error);
+    return res.status(500).json({ message: 'Ошибка в чате' });
+  }
+});
+
 const registrationCodeLimiter = buildCodeLimiter('Слишком много запросов кода. Попробуйте позже.');
 const passwordResetLimiter = buildCodeLimiter('Слишком много запросов кода сброса. Попробуйте позже.');
 
@@ -496,7 +725,7 @@ app.get('/admin', (req, res) => {
 });
 
 // JWT Authentication Middleware
-const authenticateJWT = (req, res, next) => {
+function authenticateJWT(req, res, next) {
   const token = req.cookies.token || req.headers.authorization?.split(' ')[1];
 
   if (!token) {
@@ -510,16 +739,16 @@ const authenticateJWT = (req, res, next) => {
     req.user = user;
     next();
   });
-};
+}
 
 // Admin Authentication Middleware
-const isAdmin = (req, res, next) => {
+function isAdmin(req, res, next) {
   if (req.user && req.user.role === 'admin') {
     next();
   } else {
     res.status(403).json({ message: 'Admin access required' });
   }
-};
+}
 
 // Логирование всех запросов
 const SENSITIVE_FIELDS = new Set(['password', 'currentPassword', 'newPassword', 'verificationCode', 'resetCode', 'token', 'avatarBase64']);

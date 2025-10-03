@@ -229,6 +229,37 @@
                             </form>
                         </section>
 
+                        <!-- Gemini API Key Management -->
+                        <section class="glass-card rounded-3xl border border-white/80 p-6 md:p-8 shadow-xl" id="aiGeminiSection">
+                            <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-6">
+                                <div>
+                                    <h2 class="text-2xl font-semibold text-gray-900">Gemini API ключ</h2>
+                                    <p class="text-gray-500 text-sm">Хранится зашифрованным в базе. Используется только сервером для проксирования запросов AI.</p>
+                                </div>
+                                <div class="flex items-center gap-3 bg-gray-100/60 rounded-full px-4 py-2 text-sm text-gray-500">
+                                    <i data-lucide="key" class="w-4 h-4"></i>
+                                    <span id="geminiKeyStatus">Статус: не загружен</span>
+                                </div>
+                            </div>
+
+                            <form id="geminiKeyForm" class="space-y-4">
+                                <div class="grid md:grid-cols-[1fr,auto] gap-3 items-center">
+                                    <div class="relative">
+                                        <label for="geminiKeyInput" class="block text-sm font-semibold text-gray-600 mb-2">Новый ключ Gemini</label>
+                                        <input type="password" id="geminiKeyInput" class="w-full rounded-2xl border border-gray-200 bg-white/90 px-4 py-3 text-gray-900 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition" placeholder="AIza..." autocomplete="off">
+                                        <button type="button" id="geminiKeyReveal" class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-indigo-500">
+                                            <i data-lucide="eye" class="w-5 h-5"></i>
+                                        </button>
+                                    </div>
+                                    <button type="submit" id="geminiKeySaveBtn" class="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold shadow-lg shadow-indigo-500/30 transition">
+                                        <i data-lucide="save" class="w-4 h-4"></i>
+                                        Сохранить ключ
+                                    </button>
+                                </div>
+                                <p class="text-xs text-gray-400">Подсказка: ключ будет зашифрован симметрично (AES-GCM) с помощью AI_KEYS_SECRET на сервере.</p>
+                            </form>
+                        </section>
+
                         <section class="glass-card rounded-3xl border border-white/80 p-6 md:p-8 shadow-xl" id="proPlansSection">
                             <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-6">
                                 <div>
@@ -412,6 +443,12 @@
         const publishUpdateBtn = document.getElementById('publishUpdateBtn');
         const publishUpdateStatus = document.getElementById('publishUpdateStatus');
         const latestUpdateInfo = document.getElementById('latestUpdateInfo');
+        // Gemini key elements
+        const geminiKeyForm = document.getElementById('geminiKeyForm');
+        const geminiKeyInput = document.getElementById('geminiKeyInput');
+        const geminiKeyReveal = document.getElementById('geminiKeyReveal');
+        const geminiKeyStatus = document.getElementById('geminiKeyStatus');
+        const geminiKeySaveBtn = document.getElementById('geminiKeySaveBtn');
 
         let availableBadges = [];
         let proPlans = [];
@@ -494,6 +531,8 @@
                     loadRegistrationSettings();
                     loadLatestUpdate();
                     connectWebSocket();
+                    // Load Gemini key status
+                    loadGeminiKeyStatus();
                     passwordInput.value = '';
                 } else {
                     showToast(data.message || 'Ошибка входа', 'error');
@@ -580,6 +619,8 @@
                     loadUsers();
                     loadServerStatus();
                     connectWebSocket();
+                    // Load Gemini key status
+                    loadGeminiKeyStatus();
                 } else {
                     localStorage.removeItem('adminToken');
                     loginForm.classList.remove('hidden');
