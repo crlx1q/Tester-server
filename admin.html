@@ -770,7 +770,10 @@
             }
         }
 
-        refreshProPlansBtn.addEventListener('click', () => loadProPlans());
+        refreshProPlansBtn?.addEventListener('click', () => loadProPlans());
+
+        // Секция списка тарифов скрыта по требованию администратора
+        document.getElementById('proPlansSection')?.classList.add('hidden');
 
         function renderProPlanCards() {
             if (!proPlans.length) {
@@ -1207,6 +1210,17 @@
             const userId = button.getAttribute('data-id');
             const userCard = button.closest('[data-user-card="true"]');
 
+            const findUserByIdFromCard = async (card) => {
+                const uid = card?.getAttribute('data-id');
+                if (!uid) return null;
+                try {
+                    const users = await fetch(`${API_BASE_URL}/admin/users`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    }).then(r=>r.json());
+                    return users.find(u=>String(u.id)===String(uid));
+                } catch {return null;}
+            };
+
             const setLoading = (state) => {
                 button.disabled = state;
                 button.classList.toggle('opacity-70', state);
@@ -1214,46 +1228,19 @@
 
             try {
                 if (action === 'toggle-pro') {
-                    const makePro = button.getAttribute('data-status') === 'true';
-                    setLoading(true);
-
-                    const response = await fetch(`${API_BASE_URL}/admin/users/${userId}/pro`, {
-                        method: 'PUT',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${token}`
-                        },
-                        body: JSON.stringify({ status: makePro })
-                    });
-
-                    const data = await response.json();
-
-                    if (response.ok) {
-                        showToast(`Статус пользователя обновлён: ${makePro ? 'PRO активирован' : 'PRO деактивирован'}`, 'success');
-                        loadUsers();
-                    } else {
-                        showToast(data.message || 'Не удалось обновить статус пользователя', 'error');
-                    }
+                    // Открываем модальное окно управления PRO
+                    const user = await findUserByIdFromCard(userCard);
+                    if (!user) return;
+                    populateProModal(user);
+                    openModal(proModal);
+                    return;
                 } else if (action === 'grant-badge') {
-                    const badgeLabels = availableBadges.map(badge => badge.key || badge).join(', ');
-                    const hint = badgeLabels ? `Доступные бейджи: ${badgeLabels}` : 'Пока нет сохранённых бейджей';
-                    const input = prompt(`Введите бейджи через запятую. ${hint}`);
-                    const badges = parseBadgeInput(input);
-                    if (!badges.length) {
-                        return;
-                    }
-
-                    setLoading(true);
-                    const response = await updateUserBadges(userId, 'grant', badges);
-
-                    if (response.ok) {
-                        showToast('Бейджи успешно выданы', 'success');
-                        availableBadges = Array.from(new Set([...availableBadges, ...badges]));
-                        loadUsers();
-                    } else {
-                        const data = await response.json();
-                        showToast(data.message || 'Не удалось выдать бейджи', 'error');
-                    }
+                    // Открываем модальное окно выбора бейджей
+                    const user = await findUserByIdFromCard(userCard);
+                    if (!user) return;
+                    populateBadgeModal(user);
+                    openModal(badgeModal);
+                    return;
                 } else if (action === 'revoke-badge') {
                     const currentBadges = (userCard?.getAttribute('data-badges') || '').split(',').map(b => b.trim()).filter(Boolean);
                     if (!currentBadges.length) {
