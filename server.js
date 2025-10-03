@@ -373,7 +373,7 @@ const grantBadgesToUser = async (uid, badgeKeys = []) => {
         { key: normalizedKey },
         {
           $set: { icon },
-          $setOnInsert: { holders: [] },
+          $setOnInsert: { key: normalizedKey },
           $addToSet: { holders: uid.toString() }
         },
         { upsert: true }

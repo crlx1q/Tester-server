@@ -907,11 +907,11 @@
                 return `
                     <label class="badge-option">
                         <input type="checkbox" value="${normalizedKey}" class="sr-only" ${isSelected ? 'checked' : ''}>
-                        <div class="badge-option__body flex items-center gap-3 border border-gray-200 rounded-2xl px-4 py-3 bg-white/70 hover:border-indigo-200 transition">
+                        <div class="badge-option__body flex items-center gap-3 border border-gray-200 dark:border-gray-700 rounded-2xl px-4 py-3 bg-white/70 dark:bg-gray-800/70 hover:border-indigo-200 dark:hover:border-indigo-500/40 transition">
                             <i data-lucide="${icon}" class="w-4 h-4 text-indigo-500"></i>
                             <div>
-                                <p class="font-semibold text-gray-800">${formatBadgeLabel(normalizedKey)}</p>
-                                <p class="text-xs text-gray-500 font-mono">${normalizedKey}</p>
+                                <p class="font-semibold text-gray-800 dark:text-gray-100">${formatBadgeLabel(normalizedKey)}</p>
+                                <p class="text-xs text-gray-500 dark:text-gray-400 font-mono">${normalizedKey}</p>
                             </div>
                         </div>
                     </label>
@@ -1049,28 +1049,33 @@
 
             const isPro = proStatusCheckbox.checked;
             const selectedPlanInput = proForm.querySelector('input[name="proPlan"]:checked');
-            const planCode = selectedPlanInput?.value || 'forever';
+            const planCode = selectedPlanInput?.value || '1m';
 
             proForm.classList.add('opacity-70');
             proForm.querySelectorAll('input, button').forEach(el => el.disabled = true);
 
             try {
-                const response = await fetch(`${API_BASE_URL}/admin/users/${currentProUser.id}/pro`, {
-                    method: 'PUT',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                    },
-                    body: JSON.stringify({ status: isPro, plan: planCode })
-                });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.message || 'Не удалось обновить PRO статус');
+                let response, data;
+                if (!isPro) {
+                    // Полное отключение PRO
+                    response = await fetch(`${API_BASE_URL}/admin/users/${currentProUser.id}/pro/remove`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    data = await response.json();
+                    if (!response.ok) throw new Error(data.message || 'Не удалось отключить PRO');
+                    showToast('PRO отключён', 'success');
+                } else {
+                    // Копилка: добавить срок к текущей подписке
+                    response = await fetch(`${API_BASE_URL}/admin/users/${currentProUser.id}/pro/add`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                        body: JSON.stringify({ plan: planCode })
+                    });
+                    data = await response.json();
+                    if (!response.ok) throw new Error(data.message || 'Не удалось продлить PRO');
+                    showToast('PRO продлён/установлен', 'success');
                 }
-
-                showToast(isPro ? 'PRO активирован' : 'PRO отключён', 'success');
                 closeModal(proModal);
                 loadUsers();
             } catch (error) {
@@ -1275,7 +1280,7 @@
                     // Открываем модальное окно выбора бейджей
                     const user = await findUserByIdFromCard(userCard);
                     if (!user) return;
-                    populateBadgeModal(user);
+                    await populateBadgeModal(user);
                     openModal(badgeModal);
                     return;
                 } else if (action === 'revoke-badge_unused') {
