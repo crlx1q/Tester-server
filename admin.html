@@ -819,16 +819,32 @@
             }
             proPlanOptions.innerHTML = proPlans.map(plan => {
                 const id = `pro_${plan.code}`;
+                const durationLabel = plan.months ? `${plan.months} мес.` : (plan.days ? `${plan.days} дн.` : 'Навсегда');
                 return `
-                <label for="${id}" class="flex items-center gap-3 border border-gray-200 rounded-2xl p-4 cursor-pointer transition peer-checked:border-indigo-300 peer-checked:ring-2 peer-checked:ring-indigo-200 hover:border-indigo-200">
+                <label for="${id}" class="flex items-center gap-3 border border-gray-200 rounded-2xl p-4 cursor-pointer hover:border-indigo-200 transition">
                     <input type="radio" id="${id}" name="proPlan" value="${plan.code}" class="sr-only peer">
                     <span class="flex-1">
                         <span class="block font-semibold text-gray-800">${plan.label || plan.code}</span>
-                        <span class="text-sm text-gray-500">${plan.months ? `${plan.months} мес.` : (plan.days ? `${plan.days} дн.` : 'Навсегда')}</span>
+                        <span class="text-sm text-gray-500">${durationLabel}</span>
                     </span>
                 </label>
             `;}).join('');
 
+            // Добавляем визуальную подсветку выбранного тарифа
+            const updateAllStyles = ()=>{
+                proPlanOptions.querySelectorAll('input[name="proPlan"]').forEach((input)=>{
+                    const label = input.closest('label');
+                    if(!label) return;
+                    if(input.checked){
+                        label.classList.add('border-indigo-300','ring-2','ring-indigo-200');
+                    }else{
+                        label.classList.remove('border-indigo-300','ring-2','ring-indigo-200');
+                    }
+                });
+            };
+            updateAllStyles();
+
+            proPlanOptions.addEventListener('change', updateAllStyles);
         }
 
         function openModal(modal) {
