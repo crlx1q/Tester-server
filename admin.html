@@ -1365,6 +1365,11 @@
             return name.split(' ').slice(0, 2).map(part => part.charAt(0).toUpperCase()).join('') || 'AI';
         }
 
+        // Normalize badge key helper used across badge UI
+        function normalizeBadgeKey(key) {
+            return String(key || '').trim().toLowerCase();
+        }
+
         function formatBadgeLabel(badge) {
             if (!badge) {
                 return '';
