@@ -974,8 +974,11 @@
             }
         });
 
-        function populateBadgeModal(user) {
-            currentBadgeUser = user;
+        async function populateBadgeModal(user) {
+                        currentBadgeUser = user;
+            if (!availableBadges.length) {
+                await loadAvailableBadges();
+            }
             const selectedBadges = user.badges || [];
             renderBadgeOptions(selectedBadges);
             updateBadgeSelectedCount();
