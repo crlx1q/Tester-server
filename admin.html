@@ -362,7 +362,7 @@
                         <button type="button" data-modal-close="pro" class="px-4 py-3 rounded-2xl border border-gray-200 text-gray-500 hover:text-indigo-600 hover:border-indigo-200 transition">Отмена</button>
                         <button type="submit" id="proSaveBtn" class="inline-flex items-center gap-2 px-5 py-3 rounded-2xl bg-indigo-500 hover:bg-indigo-600 text-white font-semibold shadow-lg shadow-indigo-500/30 transition">
                             <i data-lucide="check" class="w-4 h-4"></i>
-                            Сохранить
+                            Добавить
                         </button>
                     </div>
                 </div>
@@ -940,22 +940,28 @@
             if (!currentBadgeUser?.id) {
                 return;
             }
-            const formBadges = Array.from(badgeForm.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
-            if (!formBadges.length) {
-                showToast('Выберите хотя бы один бейдж', 'info');
+                        const checkedBadges = Array.from(badgeForm.querySelectorAll('input[type="checkbox"]:checked')).map(i=>i.value);
+            const current = (currentBadgeUser?.badges || []).map(normalizeBadgeKey);
+            const toGrant = checkedBadges.filter(b=>!current.includes(normalizeBadgeKey(b)));
+            const toRevoke = current.filter(b=>!checkedBadges.includes(normalizeBadgeKey(b)));
+
+            if (!toGrant.length && !toRevoke.length) {
+                showToast('Изменений нет', 'info');
                 return;
             }
 
             badgeForm.classList.add('opacity-70');
             badgeForm.querySelectorAll('input, button').forEach(el => el.disabled = true);
-
             try {
-                const response = await updateUserBadges(currentBadgeUser.id, 'grant', formBadges);
-                if (!response.ok) {
-                    const data = await response.json();
-                    throw new Error(data.message || 'Не удалось выдать бейджи');
+                if (toGrant.length) {
+                    const r = await updateUserBadges(currentBadgeUser.id,'grant',toGrant);
+                    if(!r.ok){const d=await r.json();throw new Error(d.message||'Ошибка выдачи');}
                 }
-                showToast('Бейджи сохранены', 'success');
+                if (toRevoke.length) {
+                    const r = await updateUserBadges(currentBadgeUser.id,'revoke',toRevoke);
+                    if(!r.ok){const d=await r.json();throw new Error(d.message||'Ошибка снятия');}
+                }
+                showToast('Бейджи обновлены', 'success');
                 closeModal(badgeModal);
                 loadUsers();
                 loadAvailableBadges();
@@ -1196,13 +1202,9 @@
                                 ${user.pro?.status ? 'Снять PRO' : 'Выдать PRO'}
                             </button>
                             <button class="px-4 py-2 rounded-xl border border-sky-100 text-sky-600 hover:bg-sky-50 transition text-sm font-semibold"
-                                data-action="grant-badge" data-id="${user.id}">
-                                Выдать бейдж
+                                data-action="edit-badges" data-id="${user.id}">
+                                Бейджи
                             </button>
-                            ${user.badges?.length ? `<button class="px-4 py-2 rounded-xl border border-amber-100 text-amber-600 hover:bg-amber-50 transition text-sm font-semibold"
-                                data-action="revoke-badge" data-id="${user.id}">
-                                Снять бейдж
-                            </button>` : ''}
                             <button class="px-4 py-2 rounded-xl border border-rose-100 text-rose-600 hover:bg-rose-50 transition text-sm font-semibold"
                                 data-action="delete-user" data-id="${user.id}" data-name="${escapeHtml(user.name || user.email)}">
                                 Удалить
@@ -1254,14 +1256,14 @@
                     populateProModal(user);
                     openModal(proModal);
                     return;
-                } else if (action === 'grant-badge') {
+                } else if (action === 'edit-badges') {
                     // Открываем модальное окно выбора бейджей
                     const user = await findUserByIdFromCard(userCard);
                     if (!user) return;
                     populateBadgeModal(user);
                     openModal(badgeModal);
                     return;
-                } else if (action === 'revoke-badge') {
+                } else if (action === 'revoke-badge_unused') {
                     const currentBadges = (userCard?.getAttribute('data-badges') || '').split(',').map(b => b.trim()).filter(Boolean);
                     if (!currentBadges.length) {
                         showToast('У пользователя нет бейджей для удаления', 'info');
