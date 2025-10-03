@@ -402,7 +402,7 @@
     </div>
 
     <script>
-        const API_BASE_URL = window.location.origin.replace(/^http:/, 'https:');
+        const API_BASE_URL = window.location.origin;
         const THEME_KEY = 'adminTheme';
         let token = localStorage.getItem('adminToken');
 
@@ -546,8 +546,7 @@
         document.getElementById('logoutBtn').addEventListener('click', () => {
             localStorage.removeItem('adminToken');
             token = null;
-            adminPanel.classList.add('hidden');
-            loginForm.classList.remove('hidden');
+            showLoginPanel();
             showToast('Вы вышли из панели', 'info');
         });
 
@@ -618,17 +617,20 @@
                     showAdminPanel();
                     loadUsers();
                     loadServerStatus();
+                    loadAvailableBadges();
+                    loadProPlans();
+                    loadRegistrationSettings();
+                    loadLatestUpdate();
                     connectWebSocket();
-                    // Load Gemini key status
                     loadGeminiKeyStatus();
                 } else {
                     localStorage.removeItem('adminToken');
-                    loginForm.classList.remove('hidden');
+                    showLoginPanel();
                 }
             } catch (error) {
                 console.error('Token verification error:', error);
                 localStorage.removeItem('adminToken');
-                loginForm.classList.remove('hidden');
+                showLoginPanel();
             }
         }
 
@@ -1200,6 +1202,78 @@
             adminPanel.classList.remove('hidden');
             lucide.createIcons();
         }
+
+        function showLoginPanel() {
+            adminPanel.classList.add('hidden');
+            loginForm.classList.remove('hidden');
+            lucide.createIcons();
+        }
+
+        // === Gemini Key Logic ===
+        function setGeminiStatus(text) {
+            if (geminiKeyStatus) geminiKeyStatus.textContent = text;
+        }
+
+        async function loadGeminiKeyStatus() {
+            try {
+                const res = await fetch(`${API_BASE_URL}/admin/ai/gemini-key`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Не удалось получить статус ключа');
+                if (data.configured) {
+                    const updated = data.updatedAt ? new Date(data.updatedAt).toLocaleString() : '';
+                    setGeminiStatus(`Статус: настроен (…${data.last4 || '****'}) • ${updated}`);
+                } else {
+                    setGeminiStatus('Статус: не загружен');
+                }
+            } catch (e) {
+                console.error('loadGeminiKeyStatus error', e);
+                setGeminiStatus('Статус: ошибка загрузки');
+            }
+        }
+
+        geminiKeyReveal?.addEventListener('click', () => {
+            if (!geminiKeyInput) return;
+            const isPassword = geminiKeyInput.type === 'password';
+            geminiKeyInput.type = isPassword ? 'text' : 'password';
+            geminiKeyReveal.innerHTML = isPassword
+                ? '<i data-lucide="eye-off" class="w-5 h-5"></i>'
+                : '<i data-lucide="eye" class="w-5 h-5"></i>';
+            lucide.createIcons();
+        });
+
+        geminiKeyForm?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const apiKey = (geminiKeyInput?.value || '').trim();
+            if (!apiKey || apiKey.length < 10) {
+                showToast('Введите корректный ключ Gemini', 'error');
+                return;
+            }
+            try {
+                geminiKeySaveBtn.disabled = true;
+                geminiKeySaveBtn.classList.add('opacity-70','cursor-not-allowed');
+                const res = await fetch(`${API_BASE_URL}/admin/ai/gemini-key`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ apiKey })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.message || 'Не удалось сохранить ключ');
+                geminiKeyInput.value = '';
+                await loadGeminiKeyStatus();
+                showToast('Ключ Gemini сохранён', 'success');
+            } catch (error) {
+                console.error('Save Gemini key error', error);
+                showToast(error.message || 'Ошибка сохранения ключа', 'error');
+            } finally {
+                geminiKeySaveBtn.disabled = false;
+                geminiKeySaveBtn.classList.remove('opacity-70','cursor-not-allowed');
+            }
+        });
 
         async function loadUsers() {
             try {
