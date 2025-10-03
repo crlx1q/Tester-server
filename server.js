@@ -660,26 +660,25 @@ app.get('/admin/users', authenticateJWT, isAdmin, async (req, res) => {
 
 const computeProDates = (planCode) => {
   const plan = getPlanByCode(planCode);
-  if (!plan) {
-    return null;
-  }
+  if (!plan) return null;
 
   const startDate = new Date();
-  if (plan.months === null) {
-    return {
-      plan: plan.code,
-      startDate,
-      endDate: null,
-    };
+
+  // Forever plan (null months & days)
+  if (plan.months === null && plan.days == null) {
+    return { plan: plan.code, startDate, endDate: null };
   }
 
   const endDate = new Date(startDate);
-  endDate.setMonth(endDate.getMonth() + plan.months);
-  return {
-    plan: plan.code,
-    startDate,
-    endDate,
-  };
+  if (typeof plan.months === 'number') {
+    endDate.setMonth(endDate.getMonth() + plan.months);
+  } else if (typeof plan.days === 'number') {
+    endDate.setDate(endDate.getDate() + plan.days);
+  } else {
+    return null; // invalid plan structure
+  }
+
+  return { plan: plan.code, startDate, endDate };
 };
 
 const normalizeProState = (proState = {}) => {
