@@ -101,6 +101,7 @@ const DEFAULT_BADGES = [
 ];
 
 const PRO_PLANS = [
+  { code: '1d', days: 1, label: '1 день' },
   { code: '1m', months: 1, label: '1 месяц' },
   { code: '3m', months: 3, label: '3 месяца' },
   { code: '6m', months: 6, label: '6 месяцев' },
@@ -711,6 +712,52 @@ const normalizeProState = (proState = {}) => {
   };
 };
 
+const addDurationToDate = (date, { months = 0, days = 0 }) => {
+  const newDate = new Date(date);
+  if (months) {
+    newDate.setMonth(newDate.getMonth() + months);
+  }
+  if (days) {
+    newDate.setDate(newDate.getDate() + days);
+  }
+  return newDate;
+};
+
+const extendProPlan = (user, planCode) => {
+  const plan = getPlanByCode(planCode);
+  if (!plan) {
+    throw new Error(`Unknown PRO plan: ${planCode}`);
+  }
+  const now = new Date();
+  if (!user.pro) {
+    user.pro = {};
+  }
+
+  // If no active subscription or expired, start from now
+  let start = user.pro.startDate && user.pro.status ? new Date(user.pro.startDate) : now;
+  let end = user.pro.endDate && user.pro.status ? new Date(user.pro.endDate) : now;
+
+  if (!user.pro.status || (user.pro.endDate && end < now)) {
+    start = now;
+    end = now;
+  }
+
+  if (plan.months != null) {
+    end = addDurationToDate(end, { months: plan.months });
+  } else if (plan.days != null) {
+    end = addDurationToDate(end, { days: plan.days });
+  } else {
+    // forever
+    end = null;
+  }
+
+  user.pro.status = true;
+  user.pro.startDate = start;
+  user.pro.endDate = end;
+  user.pro.plan = plan.code;
+  user.pro.updatedAt = new Date();
+};
+
 const applyProPlan = (user, status, planCode) => {
   user.pro = user.pro || {};
 
@@ -735,6 +782,7 @@ const applyProPlan = (user, status, planCode) => {
   user.pro.updatedAt = new Date();
 };
 
+// Legacy PUT route kept for backward-compat
 app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, async (req, res) => {
   const userId = parseInt(req.params.userId, 10);
   const { status, plan } = req.body;
@@ -764,6 +812,43 @@ app.put('/admin/users/:userId/pro', authenticateJWT, isAdmin, async (req, res) =
       return res.status(400).json({ success: false, message: 'Указан неизвестный тариф PRO' });
     }
     res.status(500).json({ success: false, message: 'Не удалось обновить статус PRO' });
+  }
+});
+
+// Add duration to PRO like a bank
+app.post('/admin/users/:userId/pro/add', authenticateJWT, isAdmin, async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  const { plan } = req.body || {};
+  if (!Number.isFinite(userId) || !plan) {
+    return res.status(400).json({ success: false, message: 'Некорректные данные' });
+  }
+  try {
+    const user = await findUserById(userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    extendProPlan(user, plan);
+    await user.save();
+    res.json({ success: true, user: await buildUserResponse(user) });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] extendProPlan', error);
+    res.status(500).json({ success: false, message: error.message || 'Ошибка продления PRO' });
+  }
+});
+
+// Remove PRO completely
+app.post('/admin/users/:userId/pro/remove', authenticateJWT, isAdmin, async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!Number.isFinite(userId)) {
+    return res.status(400).json({ success: false, message: 'Некорректный идентификатор пользователя' });
+  }
+  try {
+    const user = await findUserById(userId);
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    user.pro = { status:false,startDate:null,endDate:null,plan:PRO_PLAN_DEFAULT,updatedAt:new Date() };
+    await user.save();
+    res.json({ success: true, user: await buildUserResponse(user) });
+  } catch (error) {
+    console.error('[ADMIN][ERROR] removePro', error);
+    res.status(500).json({ success: false, message: 'Ошибка удаления PRO' });
   }
 });
 
