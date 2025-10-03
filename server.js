@@ -95,17 +95,18 @@ const verifyPassword = async (plainPassword, storedPassword) => {
 };
 
 const DEFAULT_BADGES = [
-  { key: 'beta', icon: 'rocket' },
   { key: 'designer', icon: 'pen-tool' },
   { key: 'programmer', icon: 'terminal' },
 ];
 
 const PRO_PLANS = [
+  { code: '1d', days: 1, label: '1 день (тестовый)' },
   { code: '1m', months: 1, label: '1 месяц' },
   { code: '3m', months: 3, label: '3 месяца' },
   { code: '6m', months: 6, label: '6 месяцев' },
   { code: '1y', months: 12, label: '12 месяцев' },
   { code: 'forever', months: null, label: 'Навсегда' },
+{{ ... }}
 ];
 
 const PRO_PLAN_DEFAULT = 'free';
@@ -664,7 +665,7 @@ const computeProDates = (planCode) => {
   }
 
   const startDate = new Date();
-  if (plan.months === null) {
+  if (plan.months === null && plan.days == null) {
     return {
       plan: plan.code,
       startDate,
@@ -673,7 +674,11 @@ const computeProDates = (planCode) => {
   }
 
   const endDate = new Date(startDate);
-  endDate.setMonth(endDate.getMonth() + plan.months);
+  if (plan.days != null) {
+    endDate.setDate(endDate.getDate() + plan.days);
+  } else {
+    endDate.setMonth(endDate.getMonth() + plan.months);
+  }
   return {
     plan: plan.code,
     startDate,
