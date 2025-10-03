@@ -766,7 +766,11 @@
                 renderProPlanOptions();
             } catch (error) {
                 console.error('Load PRO plans error:', error);
+                proPlans = [];
                 proPlansList.innerHTML = `<div class="p-6 border border-dashed border-rose-200 rounded-2xl text-rose-400">${error.message || 'Не удалось загрузить тарифы PRO'}</div>`;
+                if (proPlanOptions) {
+                    proPlanOptions.innerHTML = '<div class="p-4 border border-dashed border-rose-200 rounded-2xl text-rose-400">Не удалось загрузить тарифы PRO</div>';
+                }
             }
         }
 
@@ -817,6 +821,10 @@
             if (!proPlanOptions) {
                 return;
             }
+            if (!proPlans || !proPlans.length) {
+                proPlanOptions.innerHTML = '<div class="p-4 border border-dashed border-gray-200 rounded-2xl text-gray-400">Тарифы не найдены</div>';
+                return;
+            }
             proPlanOptions.innerHTML = proPlans.map(plan => {
                 const id = `pro_${plan.code}`;
                 const durationLabel = plan.months ? `${plan.months} мес.` : (plan.days ? `${plan.days} дн.` : 'Навсегда');
@@ -842,8 +850,12 @@
                     }
                 });
             };
+            // Если ничего не выбрано — выбрать первый тариф по умолчанию
+            const first = proPlanOptions.querySelector('input[name="proPlan"]');
+            if (first && !proPlanOptions.querySelector('input[name="proPlan"]:checked')) {
+                first.checked = true;
+            }
             updateAllStyles();
-
             proPlanOptions.addEventListener('change', updateAllStyles);
         }
 
@@ -975,17 +987,17 @@
         });
 
         async function populateBadgeModal(user) {
-                        currentBadgeUser = user;
-            if (!availableBadges.length) {
-                await loadAvailableBadges();
-            }
+            currentBadgeUser = user;
+            await loadAvailableBadges();
             const selectedBadges = user.badges || [];
             renderBadgeOptions(selectedBadges);
             updateBadgeSelectedCount();
         }
 
-        function populateProModal(user) {
+        async function populateProModal(user) {
             currentProUser = user;
+            await loadProPlans();
+            renderProPlanOptions();
             updateProModal(user);
         }
 
@@ -1256,7 +1268,7 @@
                     // Открываем модальное окно управления PRO
                     const user = await findUserByIdFromCard(userCard);
                     if (!user) return;
-                    populateProModal(user);
+                    await populateProModal(user);
                     openModal(proModal);
                     return;
                 } else if (action === 'edit-badges') {
