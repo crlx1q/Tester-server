@@ -1639,6 +1639,28 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Download APK endpoint
+app.get('/download-apk', (req, res) => {
+  const apkPath = path.join(__dirname, 'apk', 'app-release.apk');
+
+  // Check if file exists
+  if (!fs.existsSync(apkPath)) {
+    return res.status(404).json({ message: 'APK файл не найден' });
+  }
+
+  // Set headers for download
+  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.setHeader('Content-Disposition', 'attachment; filename="aistudymate.apk"');
+
+  // Send the file
+  res.download(apkPath, 'aistudymate.apk', (err) => {
+    if (err) {
+      console.error('[DOWNLOAD][ERROR] Не удалось скачать APK:', err);
+      res.status(500).json({ message: 'Ошибка при скачивании APK' });
+    }
+  });
+});
+
 const createServer = () => {
   const keyPath = process.env.SSL_KEY_PATH;
   const certPath = process.env.SSL_CERT_PATH;
