@@ -214,6 +214,17 @@ const userSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: null },
     plan: { type: String, default: PRO_PLAN_DEFAULT },
   },
+  streak: {
+    count: { type: Number, default: 0 },
+    lastActivity: { type: Date, default: null },
+    lastReset: { type: Date, default: null },
+  },
+  limits: {
+    scan: { type: Number, default: 0 },
+    voice: { type: Number, default: 0 },
+    chat: { type: Number, default: 0 },
+    resetDate: { type: Date, default: () => new Date() },
+  },
   createdAt: { type: Date, default: Date.now },
 }, { versionKey: false });
 
@@ -578,7 +589,8 @@ app.get('/admin/ai/gemini-key', authenticateJWT, isAdmin, async (req, res) => {
 
 // --- AI Proxy (Gemini) ---
 const callGemini = (apiKey, payload) => new Promise((resolve, reject) => {
-  const path = `/v1beta/models/gemini-2.0-flash-preview-12-20:generateContent?key=${encodeURIComponent(apiKey)}`;
+  // Using gemini-2.0-flash-exp (multimodal model supporting images, text)
+  const path = `/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${encodeURIComponent(apiKey)}`;
   const options = {
     hostname: 'generativelanguage.googleapis.com',
     method: 'POST',
@@ -684,7 +696,7 @@ app.post('/ai/analyze-text', async (req, res) => {
 
 app.post('/ai/chat', async (req, res) => {
   try {
-    const { message, history } = req.body || {};
+    const { message, history, mimeType, base64Image } = req.body || {};
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ message: 'message обязателен' });
     }
@@ -699,7 +711,14 @@ app.post('/ai/chat', async (req, res) => {
         contents.push({ parts: [{ text: msg.text }], role: msg.sender === 'user' ? 'user' : 'model' });
       }
     }
-    contents.push({ parts: [{ text: message }], role: 'user' });
+    
+    // Support for image attachments in chat
+    const userParts = [{ text: message }];
+    if (mimeType && base64Image) {
+      userParts.push({ inlineData: { mimeType, data: base64Image } });
+    }
+    contents.push({ parts: userParts, role: 'user' });
+    
     const payload = {
       contents,
       generationConfig: { temperature: 0.9, topK: 40, topP: 0.95, maxOutputTokens: 1024 },
@@ -711,6 +730,283 @@ app.post('/ai/chat', async (req, res) => {
   } catch (error) {
     console.error('[AI][ERROR] chat', error);
     return res.status(500).json({ message: 'Ошибка в чате' });
+  }
+});
+
+// === Streak and Limits Management ===
+const FREE_LIMITS = { scan: 5, voice: 5, chat: 20 };
+const PRO_LIMITS = { scan: 100, voice: 100, chat: 500 };
+
+const isNewDay = (lastDate) => {
+  if (!lastDate) return true;
+  const last = new Date(lastDate);
+  const now = new Date();
+  return last.getDate() !== now.getDate() || 
+         last.getMonth() !== now.getMonth() || 
+         last.getFullYear() !== now.getFullYear();
+};
+
+const shouldResetStreak = (lastActivity) => {
+  if (!lastActivity) return false;
+  const last = new Date(lastActivity);
+  const now = new Date();
+  const diffDays = Math.floor((now - last) / (1000 * 60 * 60 * 24));
+  return diffDays > 1; // Reset if more than 1 day passed
+};
+
+const updateStreak = async (user) => {
+  if (!user.streak) {
+    user.streak = { count: 0, lastActivity: null, lastReset: null };
+  }
+  
+  const now = new Date();
+  
+  if (shouldResetStreak(user.streak.lastActivity)) {
+    user.streak.count = 1;
+    user.streak.lastReset = now;
+  } else if (isNewDay(user.streak.lastActivity)) {
+    user.streak.count += 1;
+  }
+  
+  user.streak.lastActivity = now;
+};
+
+const checkAndResetLimits = async (user) => {
+  if (!user.limits) {
+    user.limits = { scan: 0, voice: 0, chat: 0, resetDate: new Date() };
+  }
+  
+  const now = new Date();
+  const resetDate = new Date(user.limits.resetDate);
+  
+  // Reset daily limits at midnight
+  if (isNewDay(resetDate)) {
+    user.limits.scan = 0;
+    user.limits.voice = 0;
+    user.limits.chat = 0;
+    user.limits.resetDate = now;
+  }
+};
+
+const checkLimit = (user, limitType) => {
+  const limits = user.pro?.status ? PRO_LIMITS : FREE_LIMITS;
+  const current = user.limits?.[limitType] || 0;
+  return current < limits[limitType];
+};
+
+const incrementLimit = (user, limitType) => {
+  if (!user.limits) {
+    user.limits = { scan: 0, voice: 0, chat: 0, resetDate: new Date() };
+  }
+  user.limits[limitType] = (user.limits[limitType] || 0) + 1;
+};
+
+const getUserLimitsInfo = (user) => {
+  const limits = user.pro?.status ? PRO_LIMITS : FREE_LIMITS;
+  return {
+    scan: { used: user.limits?.scan || 0, total: limits.scan, remaining: limits.scan - (user.limits?.scan || 0) },
+    voice: { used: user.limits?.voice || 0, total: limits.voice, remaining: limits.voice - (user.limits?.voice || 0) },
+    chat: { used: user.limits?.chat || 0, total: limits.chat, remaining: limits.chat - (user.limits?.chat || 0) },
+    resetDate: user.limits?.resetDate || new Date(),
+    isPro: user.pro?.status || false,
+  };
+};
+
+// === New AI Endpoints with Limits and Streak ===
+app.post('/api/ai/scan', async (req, res) => {
+  try {
+    const { userId, mimeType, base64Image } = req.body || {};
+    if (!userId || !mimeType || !base64Image) {
+      return res.status(400).json({ message: 'userId, mimeType и base64Image обязательны' });
+    }
+    
+    const user = await findUserById(Number(userId));
+    if (!user) {
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+    
+    await checkAndResetLimits(user);
+    
+    if (!checkLimit(user, 'scan')) {
+      const limitsInfo = getUserLimitsInfo(user);
+      return res.status(429).json({ 
+        message: 'Достигнут дневной лимит сканирований. Обновите до PRO для увеличения лимитов.',
+        limits: limitsInfo 
+      });
+    }
+    
+    const apiKey = await loadGeminiKey();
+    if (!apiKey) {
+      return res.status(503).json({ message: 'Gemini API ключ не настроен' });
+    }
+    
+    const payload = {
+      contents: [
+        { parts: [
+          { text: 'Проанализируй этот конспект. Предоставь краткую сводку (не более 150 слов), ключевые моменты (3-5 пунктов) и возможные вопросы для теста (3-5 вопросов). Ответь на русском языке.' },
+          { inlineData: { mimeType, data: base64Image } }
+        ]}
+      ],
+      generationConfig: { temperature: 0.7, topK: 40, topP: 0.95, maxOutputTokens: 1024 }
+    };
+    
+    const result = await callGemini(apiKey, payload);
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const analysis = parseAnalysisResponse(text);
+    
+    incrementLimit(user, 'scan');
+    await updateStreak(user);
+    await user.save();
+    
+    return res.json({ 
+      ...analysis, 
+      limits: getUserLimitsInfo(user),
+      streak: user.streak 
+    });
+  } catch (error) {
+    console.error('[AI][ERROR] scan', error);
+    return res.status(500).json({ message: 'Ошибка анализа изображения' });
+  }
+});
+
+app.post('/api/ai/voice', async (req, res) => {
+  try {
+    const { userId, transcription } = req.body || {};
+    if (!userId || !transcription || typeof transcription !== 'string') {
+      return res.status(400).json({ message: 'userId и transcription обязательны' });
+    }
+    
+    const user = await findUserById(Number(userId));
+    if (!user) {
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+    
+    await checkAndResetLimits(user);
+    
+    if (!checkLimit(user, 'voice')) {
+      const limitsInfo = getUserLimitsInfo(user);
+      return res.status(429).json({ 
+        message: 'Достигнут дневной лимит анализа аудио. Обновите до PRO для увеличения лимитов.',
+        limits: limitsInfo 
+      });
+    }
+    
+    const apiKey = await loadGeminiKey();
+    if (!apiKey) {
+      return res.status(503).json({ message: 'Gemini API ключ не настроен' });
+    }
+    
+    const payload = {
+      contents: [ { parts: [ { text: `Проанализируй эту расшифровку лекции: "${transcription}". Предоставь краткую сводку (не более 150 слов), ключевые моменты (3-5 пунктов) и возможные вопросы для теста (3-5 вопросов). Ответь на русском языке.` } ] } ],
+      generationConfig: { temperature: 0.7, topK: 40, topP: 0.95, maxOutputTokens: 1024 }
+    };
+    
+    const result = await callGemini(apiKey, payload);
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const analysis = parseAnalysisResponse(text);
+    
+    incrementLimit(user, 'voice');
+    await updateStreak(user);
+    await user.save();
+    
+    return res.json({ 
+      ...analysis, 
+      limits: getUserLimitsInfo(user),
+      streak: user.streak 
+    });
+  } catch (error) {
+    console.error('[AI][ERROR] voice', error);
+    return res.status(500).json({ message: 'Ошибка анализа текста' });
+  }
+});
+
+app.post('/api/ai/chat', async (req, res) => {
+  try {
+    const { userId, message, history, mimeType, base64Image } = req.body || {};
+    if (!userId || !message || typeof message !== 'string') {
+      return res.status(400).json({ message: 'userId и message обязательны' });
+    }
+    
+    const user = await findUserById(Number(userId));
+    if (!user) {
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+    
+    await checkAndResetLimits(user);
+    
+    if (!checkLimit(user, 'chat')) {
+      const limitsInfo = getUserLimitsInfo(user);
+      return res.status(429).json({ 
+        message: 'Достигнут дневной лимит сообщений в чате. Обновите до PRO для увеличения лимитов.',
+        limits: limitsInfo 
+      });
+    }
+    
+    const apiKey = await loadGeminiKey();
+    if (!apiKey) {
+      return res.status(503).json({ message: 'Gemini API ключ не настроен' });
+    }
+    
+    const contents = [];
+    if (Array.isArray(history)) {
+      for (const msg of history) {
+        if (!msg || typeof msg.text !== 'string' || typeof msg.sender !== 'string') continue;
+        contents.push({ parts: [{ text: msg.text }], role: msg.sender === 'user' ? 'user' : 'model' });
+      }
+    }
+    
+    const userParts = [{ text: message }];
+    if (mimeType && base64Image) {
+      userParts.push({ inlineData: { mimeType, data: base64Image } });
+    }
+    contents.push({ parts: userParts, role: 'user' });
+    
+    const payload = {
+      contents,
+      generationConfig: { temperature: 0.9, topK: 40, topP: 0.95, maxOutputTokens: 1024 },
+      systemInstruction: { parts: [{ text: 'Ты - AI-репетитор StudyMate. Помогай студентам с учебой, отвечай на вопросы, объясняй сложные концепции простым языком. Будь дружелюбным и поддерживающим. Отвечай на русском языке.' }] }
+    };
+    
+    const result = await callGemini(apiKey, payload);
+    const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || 'Извините, не удалось получить ответ.';
+    
+    incrementLimit(user, 'chat');
+    await updateStreak(user);
+    await user.save();
+    
+    return res.json({ 
+      text,
+      limits: getUserLimitsInfo(user),
+      streak: user.streak 
+    });
+  } catch (error) {
+    console.error('[AI][ERROR] chat', error);
+    return res.status(500).json({ message: 'Ошибка в чате' });
+  }
+});
+
+app.get('/api/user/:userId/limits', async (req, res) => {
+  try {
+    const userId = parseInt(req.params.userId, 10);
+    if (!Number.isFinite(userId)) {
+      return res.status(400).json({ message: 'Некорректный идентификатор пользователя' });
+    }
+    
+    const user = await findUserById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'Пользователь не найден' });
+    }
+    
+    await checkAndResetLimits(user);
+    await user.save();
+    
+    return res.json({
+      limits: getUserLimitsInfo(user),
+      streak: user.streak || { count: 0, lastActivity: null, lastReset: null }
+    });
+  } catch (error) {
+    console.error('[API][ERROR] get limits', error);
+    return res.status(500).json({ message: 'Ошибка получения лимитов' });
   }
 });
 
